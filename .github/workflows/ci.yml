@@ -26,6 +26,23 @@ jobs:
       - name: Automated gameplay tests (bun test)
         run: bun test tests/game/
 
+      # P4-C: configuration parity against the ACTUAL Godot source data.
+      # The check compares data.ts against the real JSONs from
+      # ridho1141haha/crownfall — a Godot balance change fails CI with a diff.
+      # After an intentional Godot change, mirror the values in data.ts,
+      # refresh tests/fixtures/godot-data/, and re-pin GODOT_PARITY_COMMIT.
+      - name: Clone Godot source of truth (config parity reference)
+        run: |
+          git clone https://github.com/ridho1141haha/crownfall.git /tmp/crownfall-ref
+          git -C /tmp/crownfall-ref checkout "$GODOT_PARITY_COMMIT"
+        env:
+          GODOT_PARITY_COMMIT: 2c61632de046da04b0f291761574b6d900d4037d
+
+      - name: Configuration parity vs Godot data (tests/game/config-parity)
+        run: bun test tests/game/config-parity.test.ts
+        env:
+          GODOT_DATA_DIR: /tmp/crownfall-ref/data
+
       - name: Production build
         # next build needs the Prisma client generated (postinstall does this
         # during bun install). No secrets or external services required.

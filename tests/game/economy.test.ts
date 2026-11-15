@@ -314,3 +314,134 @@ describe("Phase 3.1 — canSpend agrees with the transaction rules", () => {
     expect(engine.stone).toBe(10);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 4 P2-C — resource additions reject unknown resource IDs
+// (EconomyLedger.try_add / try_add_bundle Phase 1 parity: the whitelist gate
+// runs BEFORE any balance math; a rejected transaction changes nothing.)
+// ---------------------------------------------------------------------------
+
+describe("Phase 4 P2-C — tryAdd rejects unknown resource IDs", () => {
+  let engine: GameEngine;
+
+  beforeEach(() => {
+    installStorage();
+    engine = makeEngine().engine;
+    engine.newGame();
+  });
+
+  test("every valid resource ID is still accepted", () => {
+    for (const id of ["gold", "wood", "stone"] as ResourceId[]) {
+      expect(engine.tryAdd(id, 1)).toBe(true);
+    }
+    expect(engine.gold).toBe(3);
+    expect(engine.wood).toBe(3);
+    expect(engine.stone).toBe(2); // 1 start + 1
+  });
+
+  test("unknown resource ID is rejected and no property is minted", () => {
+    const before = { gold: engine.gold, wood: engine.wood, stone: engine.stone };
+    expect(
+      engine.tryAdd("mana" as unknown as ResourceId, 5),
+    ).toBe(false);
+    expect(
+      engine.tryAdd("gems" as unknown as ResourceId, 5),
+    ).toBe(false);
+    expect(engine.gold).toBe(before.gold);
+    expect(engine.wood).toBe(before.wood);
+    expect(engine.stone).toBe(before.stone);
+    expect((engine as unknown as Record<string, unknown>).mana).toBeUndefined();
+    expect((engine as unknown as Record<string, unknown>).gems).toBeUndefined();
+  });
+
+  test("unknown ID cannot dodge the cap via NaN arithmetic", () => {
+    engine.gold = MAX_RESOURCE_CAP;
+    // Pre-fix, an unknown id hit `this[k] + amount > CAP` with undefined →
+    // NaN → false → "passed" and wrote NaN into the engine.
+    expect(
+      engine.tryAdd("elixir" as unknown as ResourceId, MAX_RESOURCE_CAP),
+    ).toBe(false);
+    expect(engine.gold).toBe(MAX_RESOURCE_CAP);
+    expect(
+      (engine as unknown as Record<string, unknown>).elixir,
+    ).toBeUndefined();
+  });
+});
+
+describe("Phase 4 P2-C — tryAddBundle rejects unknown resource IDs", () => {
+  let engine: GameEngine;
+
+  beforeEach(() => {
+    installStorage();
+    engine = makeEngine().engine;
+    engine.newGame();
+  });
+
+  test("bundle containing an unknown ID is rejected atomically", () => {
+    const before = { gold: engine.gold, wood: engine.wood, stone: engine.stone };
+    expect(
+      engine.tryAddBundle({
+        gold: 5,
+        mana: 3,
+      } as unknown as Partial<Record<ResourceId, number>>),
+    ).toBe(false);
+    // the VALID entry (gold +5) must NOT commit when a sibling entry is unknown
+    expect(engine.gold).toBe(before.gold);
+    expect(engine.wood).toBe(before.wood);
+    expect(engine.stone).toBe(before.stone);
+    expect((engine as unknown as Record<string, unknown>).mana).toBeUndefined();
+  });
+
+  test("all-unknown bundle rejected without side effects", () => {
+    expect(
+      engine.tryAddBundle({
+        mana: 1,
+        gems: 2,
+      } as unknown as Partial<Record<ResourceId, number>>),
+    ).toBe(false);
+    expect(engine.gold).toBe(2);
+    expect(engine.wood).toBe(2);
+    expect(engine.stone).toBe(1);
+  });
+
+  test("valid multi-resource bundle still commits", () => {
+    expect(
+      engine.tryAddBundle({ gold: 2, wood: 3, stone: 1 }),
+    ).toBe(true);
+    expect(engine.gold).toBe(4);
+    expect(engine.wood).toBe(5);
+    expect(engine.stone).toBe(2);
+  });
+
+  test("empty bundle still rejected (Phase 3 behavior preserved)", () => {
+    expect(engine.tryAddBundle({})).toBe(false);
+    expect(engine.tryAddBundle(null as unknown as Partial<Record<ResourceId, number>>)).toBe(false);
+  });
+
+  test("negative / fractional / non-finite amounts still rejected after unknown-ID fix", () => {
+    const before = { gold: engine.gold, wood: engine.wood, stone: engine.stone };
+    expect(engine.tryAdd("gold", -3)).toBe(false);
+    expect(engine.tryAdd("gold", 1.5)).toBe(false);
+    expect(engine.tryAdd("gold", Number.NaN)).toBe(false);
+    expect(engine.tryAdd("gold", Number.POSITIVE_INFINITY)).toBe(false);
+    expect(
+      engine.tryAddBundle({ gold: -1, wood: 2 } as Partial<Record<ResourceId, number>>),
+    ).toBe(false);
+    expect(
+      engine.tryAddBundle({ wood: 0.5 } as Partial<Record<ResourceId, number>>),
+    ).toBe(false);
+    expect(engine.gold).toBe(before.gold);
+    expect(engine.wood).toBe(before.wood);
+    expect(engine.stone).toBe(before.stone);
+  });
+
+  test("bundle exceeding the cap is rejected atomically (state unchanged)", () => {
+    engine.stone = MAX_RESOURCE_CAP;
+    const before = { gold: engine.gold, wood: engine.wood, stone: engine.stone };
+    expect(
+      engine.tryAddBundle({ gold: 5, stone: 2 }),
+    ).toBe(false);
+    expect(engine.gold).toBe(before.gold);
+    expect(engine.stone).toBe(before.stone);
+  });
+});

@@ -13,6 +13,7 @@ import {
   MAX_RESOURCE_CAP,
   validateSavePayload,
 } from "../../src/lib/game/save-validation";
+import { migrateSavePayload } from "../../src/lib/game/save-migration";
 
 describe("isExactIntValue (EconomyLedger.is_exact_int_value parity)", () => {
   test("accepts integers and integral floats", () => {
@@ -122,15 +123,29 @@ describe("B4 — schema/version/world identifiers", () => {
     expect(validateSavePayload(base)).toBe(true);
   });
 
-  test("supported range 1..3 accepted", () => {
-    for (const v of [1, 2, 3]) {
-      expect(reject((p) => (p.schema_version = v))).toBe(true);
+  test("legacy versions 1..2 rejected by the validator — migration required first", () => {
+    // P2-B/P4-B: a schema version is never accepted without the migration
+    // needed for it. v1/v2 payloads must go through migrateSavePayload();
+    // the Phase 2/3 range acceptance (1..3) let a raw v1 payload through
+    // with no migration path.
+    for (const v of [1, 2]) {
+      expect(reject((p) => (p.schema_version = v))).toBe(false);
+      const migrated = migrateSavePayload({ ...base, schema_version: v });
+      expect(migrated.ok).toBe(true);
+      if (migrated.ok) {
+        expect(migrated.data.schema_version).toBe(3);
+        // v3-shaped v2 fixture migrates cleanly; v1 fixture keeps Godot's
+        // own accept/reject outcome (see save-migration.test.ts).
+      }
     }
   });
 
   test("unsupported versions rejected", () => {
     for (const v of [0, 4, -1, 1.5, "3", null]) {
       expect(reject((p) => (p.schema_version = v as number))).toBe(false);
+      expect(migrateSavePayload({ ...base, schema_version: v }).ok).toBe(
+        false,
+      );
     }
   });
 

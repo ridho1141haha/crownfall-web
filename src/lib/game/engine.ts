@@ -43,6 +43,7 @@ import {
   parseSaveJson,
   validateSavePayload,
 } from "./save-validation";
+import { migrateSavePayload } from "./save-migration";
 import type {
   ActiveTarget,
   Agent,
@@ -348,9 +349,13 @@ export class GameEngine {
   }
 
   tryAdd(res: ResourceId, amount: number): boolean {
-    // Parity with EconomyLedger.try_add (Godot): exact integer amounts only,
-    // strictly positive, and the 999,999 resource cap is enforced on every
-    // add. Rejection is atomic — the balance is never partially changed.
+    // Parity with EconomyLedger.try_add (Godot): Phase 1 rejects unknown
+    // resource ids BEFORE any balance math — the ResourceId parameter type is
+    // a compile-time guarantee only, and runtime callers (debug tooling,
+    // future code) can pass anything. Then: exact integer amounts only,
+    // strictly positive, and the 999,999 resource cap enforced on every add.
+    // Rejection is atomic — the balance is never changed.
+    if (!VALID_RESOURCE_IDS.includes(res)) return false;
     if (!isExactIntValue(amount)) return false;
     const intAmount = Math.round(amount);
     if (intAmount <= 0) return false;
@@ -360,15 +365,17 @@ export class GameEngine {
   }
 
   tryAddBundle(bundle: Partial<Record<ResourceId, number>>): boolean {
-    // Parity with EconomyLedger.try_add_bundle (Godot): the complete
-    // transaction is validated (exact positive integers, aggregate cap per
-    // resource) before any balance is committed. An invalid bundle must not
-    // partially commit.
+    // Parity with EconomyLedger.try_add_bundle (Godot): every entry is
+    // validated (known resource id, exact positive integer, aggregate cap per
+    // resource) BEFORE any balance is committed. An invalid or partially
+    // invalid bundle must not commit anything — unknown ids can no longer
+    // mint arbitrary engine properties or dodge the cap via NaN comparisons.
     if (!bundle || Object.keys(bundle).length === 0) return false;
     const staged: Partial<Record<ResourceId, number>> = {};
     for (const [k, v] of Object.entries(bundle) as Array<
       [ResourceId, number]
     >) {
+      if (!VALID_RESOURCE_IDS.includes(k)) return false;
       if (!isExactIntValue(v)) return false;
       const amount = Math.round(v);
       if (amount <= 0) return false;
@@ -2257,7 +2264,17 @@ export class GameEngine {
     if (this.portalLooted) {
       return { ok: false, reason: "Portal Relic already scavenged" };
     }
-    this.tryAddBundle(PORTAL.REWARD);
+    // Godot parity (ForgottenShoreSession._on_player_loot_portal_relic):
+    // the relic is marked looted ONLY after the reward transaction succeeds;
+    // a failed transaction (e.g. a balance at the 999,999 cap rejecting the
+    // bundle) leaves the portal retryable and every balance untouched —
+    // the reward can never be lost, and success can never be duplicated.
+    if (!this.tryAddBundle(PORTAL.REWARD)) {
+      return {
+        ok: false,
+        reason: "Relic reward rejected — not enough storage capacity",
+      };
+    }
     this.portalLooted = true;
     this.hooks.sfx("coin");
     this.spawnFloat(PORTAL.X, "+3G +2S Relic", "#ffe074");
@@ -2519,12 +2536,19 @@ export class GameEngine {
     }
   }
 
-  /** Parse + validate one storage candidate without side effects. */
+  /** Parse → migrate → validate one storage candidate without side effects.
+   * Migration runs BEFORE validation (Godot `_read_and_validate_file`); the
+   * returned payload is the MIGRATED current-schema object, so applySavePayload
+   * always receives current-schema data. Legacy candidates that fail migration
+   * or post-migration validation return null (no fresh-reign fallback). */
   private readValidSaveCandidate(key: string): Record<string, unknown> | null {
     const raw = this.readStorage(key);
     if (raw === null) return null;
     const data = parseSaveJson(raw);
-    return data !== null && validateSavePayload(data) ? data : null;
+    if (data === null) return null;
+    const migrated = migrateSavePayload(data);
+    if (!migrated.ok) return null;
+    return validateSavePayload(migrated.data) ? migrated.data : null;
   }
 
   private hasAnyValidSave(): boolean {
@@ -2587,6 +2611,19 @@ export class GameEngine {
         west_enemy_max_hp: this.west.maxHp,
         settlement_breached: this.settlementBreached,
         first_night_survived: this.firstNightSurvived,
+        // P4-A (audit B7) — mid-combat sub-state, mirrors NightEncounterManager
+        // to_save_dict(): attack timers + burn accumulators snapped to 0.001,
+        // trampled plot-id arrays duplicated. Manual saves are night-locked
+        // and autosave fires at sunrise — exactly like Godot's sunrise save,
+        // these carry the dormant remainders of the finished night (never
+        // reset at sunrise on EITHER platform); both runtimes clear them at
+        // the next night start, so they never affect daytime play.
+        attack_timer: Math.round(this.night.attackTimer * 1000) / 1000,
+        light_burn_acc: Math.round(this.night.burnAccumulator * 1000) / 1000,
+        west_attack_timer: Math.round(this.west.attackTimer * 1000) / 1000,
+        west_burn_acc: Math.round(this.west.burnAccumulator * 1000) / 1000,
+        east_trampled: [...this.eastTrampled],
+        west_trampled: [...this.westTrampled],
       },
       progression_flags: {
         first_night_survived: this.firstNightSurvived,
@@ -2792,6 +2829,41 @@ export class GameEngine {
       this.west.hp = Math.max(0, Math.round(Number(nightSave.west_enemy_hp ?? 0)));
       this.west.maxHp = Math.max(1, Math.round(Number(nightSave.west_enemy_max_hp ?? 45)));
       this.settlementBreached = Boolean(nightSave.settlement_breached);
+      // P4-A (audit B7) — restore the six mid-combat sub-fields with the
+      // exact Godot apply_save_dict() clamps: attack timers within
+      // [0, ATTACK_INTERVAL], burn accumulators within [0, 1], trampled ids
+      // filtered per side (east: watchtower/farm_east; west: farm_west).
+      // Missing legacy fields default to 0 / [] (Godot data.get defaults).
+      const savedAttackTimer = Number(nightSave.attack_timer ?? 0);
+      this.night.attackTimer = Number.isFinite(savedAttackTimer)
+        ? clamp(savedAttackTimer, 0, NIGHT.ATTACK_INTERVAL)
+        : 0;
+      const savedBurnAcc = Number(nightSave.light_burn_acc ?? 0);
+      this.night.burnAccumulator = Number.isFinite(savedBurnAcc)
+        ? clamp(savedBurnAcc, 0, 1)
+        : 0;
+      const savedWestAttackTimer = Number(nightSave.west_attack_timer ?? 0);
+      this.west.attackTimer = Number.isFinite(savedWestAttackTimer)
+        ? clamp(savedWestAttackTimer, 0, NIGHT.ATTACK_INTERVAL)
+        : 0;
+      const savedWestBurnAcc = Number(nightSave.west_burn_acc ?? 0);
+      this.west.burnAccumulator = Number.isFinite(savedWestBurnAcc)
+        ? clamp(savedWestBurnAcc, 0, 1)
+        : 0;
+      const eastTrampledRaw = nightSave.east_trampled;
+      this.eastTrampled = Array.isArray(eastTrampledRaw)
+        ? (eastTrampledRaw as unknown[])
+            .map((pid) => String(pid))
+            .filter(
+              (pid) => pid === WATCHTOWER_ID || pid === FARM_EAST_ID,
+            )
+        : [];
+      const westTrampledRaw = nightSave.west_trampled;
+      this.westTrampled = Array.isArray(westTrampledRaw)
+        ? (westTrampledRaw as unknown[])
+            .map((pid) => String(pid))
+            .filter((pid) => pid === FARM_WEST_ID)
+        : [];
     }
 
     this.day = Math.round(Number(data.day_count));
