@@ -279,13 +279,25 @@ export default function CrownfallGame() {
 
   const continueGame = () => {
     audioRef.current?.unlock();
-    const ok = engineRef.current?.loadGame() ?? false;
+    const eng = engineRef.current;
+    if (!eng) return;
+    // B3: revalidate at the moment of choice so stale cached state can never
+    // mask invalid saves, and never silently start a fresh reign when the
+    // player intended to continue one (parity with Main.gd
+    // refresh_continue_state + SaveManager.has_valid_save).
+    eng.refreshHasSave();
+    if (!eng.hasSave) {
+      pushToast("No valid save found — start a New Reign instead.");
+      return;
+    }
+    const ok = eng.loadGame();
     if (ok) {
       setScreen("game");
       setPaused(false);
     } else {
-      pushToast("No usable save found — starting a fresh reign.");
-      startNew();
+      // Unreachable while hasSave is true; fail safe without auto-starting.
+      pushToast("Failed to load the saved kingdom — saves may be corrupted.");
+      eng.refreshHasSave();
     }
   };
 
