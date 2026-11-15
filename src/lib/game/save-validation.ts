@@ -161,6 +161,12 @@ export function isValidSavedBuildingDict(data: unknown): boolean {
   const level = d.level ?? 1;
   if (!isExactIntValue(level) || level < 1 || level > 2) return false;
 
+  // Phase 3.1: a PRESENT type must be a string. The previous fallback
+  // silently coerced non-string values (numeric 123, null, arrays/objects)
+  // into "wooden_wall" here — letting them pass validation for wall plots —
+  // while the restore path then converted the ORIGINAL value into "123".
+  // An absent type keeps Godot's fallback (d.get("type", "wooden_wall")).
+  if ("type" in d && typeof d.type !== "string") return false;
   const btype = typeof d.type === "string" ? d.type : "wooden_wall";
   if (btype === "stone_wall" && level < 2) return false;
   if ((btype === "watchtower" || btype === "farm_plot") && level !== 1) {
@@ -384,6 +390,10 @@ export function validateSavePayload(data: unknown): boolean {
     const plotId = String(b.id);
     if (!PLOT_IDS.includes(plotId) || seenPlotIds.has(plotId)) return false;
     seenPlotIds.add(plotId);
+    // Phase 3.1: same present-type-must-be-string guard as the per-building
+    // validator (defense in depth — this loop is the documented whitelist
+    // gate; a non-string type can no longer sneak through as "wooden_wall").
+    if ("type" in b && typeof b.type !== "string") return false;
     const btype = typeof b.type === "string" ? b.type : "wooden_wall";
     if (!PLOT_ALLOWED_TYPES[plotId].includes(btype)) return false;
     if ("position_x" in b) {

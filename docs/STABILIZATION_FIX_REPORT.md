@@ -205,3 +205,66 @@ Not browser-verified (covered deterministically by unit tests instead): night-cy
 | Browser E2E | agent-browser, 5 scenarios | **5/5 pass, 0 console errors** (executed) |
 | Git diff hygiene | `git diff` / `git status` review | only intended files; `data.ts` untouched |
 | Balance/feature change check | manual diff review | none — all constants/config identical |
+
+---
+
+# Phase 3.1 — Final Validation Hardening (2026-11-15)
+
+**Branch:** `fix/web-stabilization-phase-3` (unchanged; based on Phase 3 commit `03cc37a`)
+**Scope:** three narrowly targeted correctness gaps found by independent code review. NOT a rewrite — no gameplay features, no balance changes, no `data.ts` changes, no schema changes.
+
+## 3.1.1 — hearth_level: missing flag restored as NaN
+
+**Root cause.** `applySavePayload()` restored the hearth with `clamp(Math.round(Number(flags.hearth_level)), 1, 3)`. When `hearth_level` was absent, `Number(undefined)` produced `NaN` and `clamp(NaN, …)` (implemented via `Math.min`/`Math.max`) propagates `NaN`, so a legitimate older/minimal save without the flag restored `hearthLevel: NaN` and broke every hearth computation. Godot's load path (`SaveManager.gd:162–166`) injects `pf["hearth_level"] = 1` when absent before validation — the `flags.get("hearth_level", 1)` default — and validates only present values.
+
+**Fix** (`src/lib/game/engine.ts`, restore path): default to level 1 when the flag is absent; when present, the value must pass `isExactIntValue()` (the validator already rejects present-but-invalid values 0/4/fractional/NaN/±Infinity, unchanged). NaN can no longer enter `hearthLevel`. The field stays optional — no Godot-optional field was made mandatory.
+
+## 3.1.2 — building type: non-string values slipped through validation
+
+**Root cause.** Both `isValidSavedBuildingDict()` and the per-plot whitelist loop in `validateSavePayload()` coerced any non-string `type` into `"wooden_wall"` (`typeof d.type === "string" ? d.type : "wooden_wall"`). A numeric `type: 123` therefore *passed* validation as a wooden wall — and the restore path then stored the original value via `String(b.type)` → plot type became the string `"123"`, silently corrupting the building. (Godot coerces too, but `String(123)` = `"123"` then fails its per-plot whitelist, so the payload is rejected there.)
+
+**Fix** (`src/lib/game/save-validation.ts` + `src/lib/game/engine.ts`): a *present* `type` must be a string — numeric/boolean/null/array/object types are rejected outright in both validation sites; unknown string types keep failing the per-plot whitelist; a *genuinely absent* type keeps the existing `"wooden_wall"` fallback (Godot `d.get("type", "wooden_wall")` posture; farm/watchtower plots without a type are still whitelist-rejected, unchanged). The restore path no longer blind-coerces: `p.type = typeof b.type === "string" ? b.type : p.type`.
+
+## 3.1.3 — trySpend()/canSpend(): malformed costs could mutate balances
+
+**Root cause.** `canSpend()` compared balances against raw cost values (`(b[k] ?? 0) >= (v ?? 0)`), and `trySpend()` subtracted raw values after that check. Consequences, mirroring Godot `EconomyLedger.try_spend()`'s documented Phase-1/Phase-2 contract (`scripts/economy/EconomyLedger.gd:125–163`): an *empty* cost object passed vacuously (`[].every()` is true) and returned success; a *negative* amount passed the affordability check and **increased** the balance; a *fractional* amount created fractional balances; non-numeric/prototype-chain keys relied on accidental `?? 0`/comparison semantics instead of explicit validation.
+
+**Fix** (`src/lib/game/engine.ts`): shared `validateCost()` ports the Godot contract — empty cost rejected, unknown resource ids rejected (`VALID_RESOURCE_IDS`, immune to prototype-chain keys), zero/negative amounts rejected, fractional and non-finite amounts rejected (`isExactIntValue`), entries aggregated per resource. `canSpend()` (the UI affordability gate) applies the identical validation plus the balance comparison — exactly Godot `can_afford()` — so affordability can never disagree with the transaction rules. `trySpend()` validates the entire cost before touching any balance and commits the normalized aggregate deductions (atomic). Normal gameplay costs (all build/repair/upgrade/stand/shipwreck/hearth/recruit/flare/shrine costs in `data.ts` are non-empty positive integers; the only empty cost, `hammer_stand`, is already guarded by a `length > 0` check; the breach penalty is guarded by `penalty > 0`) are unaffected.
+
+## Phase 3.1 Regression Tests
+
+39 new tests (151 total in the suite), added to the existing `bun test` files:
+
+| Finding | Tests (`tests/game/…`) |
+|---|---|
+| hearth_level | `save-validation.test.ts` — present invalid values rejected: 0, 4, fractional, NaN, Infinity (incl. raw-JSON `1e999` route), non-numeric string; valid 1/2/3 accepted; absent stays optional (Godot injects the default at load). `save-load.test.ts` — missing flag restores `hearthLevel === 1` and never NaN; 1/2/3 restore exactly; invalid values reject the load with live state untouched (incl. Infinity route). |
+| building type | `save-validation.test.ts` — numeric/boolean/null/array/object types rejected; unknown string type rejected; standalone dict validator rejects numeric type; valid wooden_wall/stone_wall(level 2)/watchtower/farm_plot accepted; absent type on a wall plot accepted (fallback preserved), absent on a farm plot still whitelist-rejected. `save-load.test.ts` — numeric type rejects the load, plot type and live state unchanged; valid string type restores plot type exactly. |
+| trySpend/canSpend | `economy.test.ts` — empty cost, unknown id (incl. prototype-chain key), zero, negative (cannot increase a balance), fractional (cannot mint fractions), non-finite, over-balance, and multi-entry poisoned bundles all rejected with every balance unchanged; valid multi-resource spend commits atomically; `canSpend` mirrors every rule and agrees with `trySpend` on all cases; wall-build + shipwreck + hearth-upgrade gameplay spends still work. |
+
+**Pre-fix verification (bug reproduction):** with the three source fixes temporarily stashed, the suite ran **137 pass / 14 fail** — the 14 failures are exactly the new tests covering the three root causes (missing-hearth NaN restore, non-string building type acceptance + `"123"` restore, empty/zero/negative/fractional/non-finite spends succeeding). With the fixes restored: **151 pass / 0 fail**.
+
+## Phase 3.1 Commands Executed & Results
+
+All commands executed in this session from `/home/z/my-project`:
+
+| Command | Result |
+|---|---|
+| `bun test tests/game/` (fixes stashed — bug reproduction) | 137 pass / **14 fail** — all 14 are the new Phase 3.1 regression tests catching the pre-fix behavior |
+| `bun test tests/game/` (fixes restored) | **151 pass, 0 fail, 516 expect() calls** (exit 0) |
+| `bun test` (project-wide) | **151 pass, 0 fail** — no other test files interfere |
+| `bun run lint` | **clean — exit 0, no errors, no warnings** |
+| `bun run build` (dev server stopped, `.next` cleared) | **✓ Compiled successfully in 8.4s** — Next.js 16.1.3 (Turbopack), routes `/`, `/_not-found`, `/api`; static pages 4/4 |
+| `bun run dev` (restart) | Ready in 577ms; `GET / → HTTP 200` |
+| `git diff --stat` review | only `engine.ts`, `save-validation.ts`, 3 test files (+ report). **`data.ts`, components, renderer untouched** |
+
+## Phase 3.1 Verification Status Summary
+
+| Check | Command | Status |
+|---|---|---|
+| Automated tests | `bun test` | **151 pass / 0 fail** (executed; 14 pre-fix failures prove regression value) |
+| ESLint | `bun run lint` | **clean, exit 0** (executed) |
+| Production build | `bun run build` | **success, 8.4s, 4/4 pages** (executed) |
+| Diff hygiene | `git diff` review | intended files only; no balance/data/UI changes |
+| Balance/feature check | manual diff review | none — all gameplay constants and costs identical |
+
+**Remaining known issues (unchanged from Phase 3):** B7 encounter sub-field persistence stays deferred (§8.1); `refreshHasSave()` purity vs Godot's incidental self-heal (§8.2); localStorage atomicity approximation (§8.3); cross-platform save mutual rejection (§8.4); pre-existing TypeScript strictness errors in untouched code (§8.5).

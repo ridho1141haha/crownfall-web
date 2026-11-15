@@ -9,6 +9,8 @@ import {
   makeValidPayload,
   clone,
   seedMidGameState,
+  writeSlot,
+  SLOT_KEYS,
   type RecordedHooks,
 } from "./helpers";
 import { SAVE_BACKUP_KEY, SAVE_KEY } from "../../src/lib/game/data";
@@ -420,5 +422,128 @@ describe("save/load round-trip", () => {
     // payload must equal exactly what was written.
     const reloaded = JSON.parse(localStorage.getItem(SAVE_KEY) as string);
     expect(reloaded).toEqual(written);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3.1 — restore hardening (hearth_level + building type)
+// ---------------------------------------------------------------------------
+
+describe("Phase 3.1 — hearth_level restore (Godot flags.get default parity)", () => {
+  beforeEach(() => {
+    installStorage();
+  });
+
+  test("missing hearth_level restores as level 1, never NaN", () => {
+    const payload = makeValidPayload(); // seeded engine wrote hearth_level: 2
+    delete (payload.progression_flags as Record<string, unknown>).hearth_level;
+    writeSlot(SLOT_KEYS.primary, JSON.stringify(payload));
+
+    const { engine } = makeEngine();
+    engine.newGame();
+    engine.hearthLevel = 3; // distinct live state — must be replaced
+    expect(engine.loadGame()).toBe(true);
+    expect(engine.hearthLevel).toBe(1); // Godot: flags.get("hearth_level", 1)
+    expect(Number.isNaN(engine.hearthLevel)).toBe(false);
+  });
+
+  test("valid hearth_level values 1, 2 and 3 restore exactly", () => {
+    for (const level of [1, 2, 3]) {
+      const payload = makeValidPayload();
+      (payload.progression_flags as Record<string, unknown>).hearth_level =
+        level;
+      writeSlot(SLOT_KEYS.primary, JSON.stringify(payload));
+
+      const { engine } = makeEngine();
+      engine.newGame();
+      expect(engine.loadGame()).toBe(true);
+      expect(engine.hearthLevel).toBe(level);
+    }
+  });
+
+  test("invalid hearth_level values reject the load and leave live state untouched", () => {
+    const invalidValues: Array<Record<string, unknown>> = [];
+    // In-memory payloads can carry true NaN; JSON-route payloads carry the
+    // 0 / 4 / fractional / Infinity shapes a corrupted file actually has.
+    for (const v of [0, 4, 2.5]) {
+      invalidValues.push({ hearth_level: v });
+    }
+    invalidValues.push({ hearth_level: Number.NaN });
+
+    for (const flagPatch of invalidValues) {
+      const payload = makeValidPayload();
+      Object.assign(
+        payload.progression_flags as Record<string, unknown>,
+        flagPatch,
+      );
+      writeSlot(SLOT_KEYS.primary, JSON.stringify(payload));
+
+      const { engine } = makeEngine();
+      engine.newGame();
+      engine.gold = 77; // live divergence — must survive the rejected load
+      engine.hearthLevel = 2;
+      expect(engine.loadGame()).toBe(false);
+      expect(engine.gold).toBe(77);
+      expect(engine.hearthLevel).toBe(2);
+      expect(Number.isNaN(engine.hearthLevel)).toBe(false);
+    }
+
+    // Infinity via the raw JSON text route (1e999 parses to Infinity).
+    const payload = makeValidPayload();
+    const raw = JSON.stringify(payload).replace(
+      '"hearth_level":2',
+      '"hearth_level":1e999',
+    );
+    expect(raw).toContain("1e999");
+    writeSlot(SLOT_KEYS.primary, raw);
+    const { engine } = makeEngine();
+    engine.newGame();
+    engine.gold = 77;
+    expect(engine.loadGame()).toBe(false);
+    expect(engine.gold).toBe(77);
+  });
+});
+
+describe("Phase 3.1 — building type restore (no blind String() coercion)", () => {
+  beforeEach(() => {
+    installStorage();
+  });
+
+  test("numeric building type is rejected at load; live state and plot types unchanged", () => {
+    // The pre-fix exploit: validation coerced 123 into "wooden_wall" and
+    // passed the wall-plot whitelist, while the restore path then stored
+    // String(123) === "123" as the plot type.
+    const payload = makeValidPayload();
+    const wall = (payload.buildings as Array<Record<string, unknown>>).find(
+      (b) => b.id === "wall_east_01",
+    ) as Record<string, unknown>;
+    wall.type = 123;
+    writeSlot(SLOT_KEYS.primary, JSON.stringify(payload));
+
+    const { engine } = makeEngine();
+    engine.newGame();
+    engine.gold = 77;
+    const typeBefore = engine.plots.get("wall_east_01")?.type;
+    expect(engine.loadGame()).toBe(false);
+    expect(engine.gold).toBe(77);
+    expect(engine.plots.get("wall_east_01")?.type).toBe(typeBefore);
+    expect(engine.plots.get("wall_east_01")?.type).toBe("wooden_wall");
+  });
+
+  test("a valid string-typed save still restores plot types exactly", () => {
+    const payload = makeValidPayload();
+    const wall = (payload.buildings as Array<Record<string, unknown>>).find(
+      (b) => b.id === "wall_east_01",
+    ) as Record<string, unknown>;
+    wall.type = "stone_wall";
+    wall.level = 2;
+    wall.max_durability = 260;
+    wall.durability = 260;
+    writeSlot(SLOT_KEYS.primary, JSON.stringify(payload));
+
+    const { engine } = makeEngine();
+    engine.newGame();
+    expect(engine.loadGame()).toBe(true);
+    expect(engine.plots.get("wall_east_01")?.type).toBe("stone_wall");
   });
 });

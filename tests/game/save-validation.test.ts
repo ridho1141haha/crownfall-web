@@ -891,3 +891,223 @@ describe("B4 — legitimate saves are not rejected", () => {
     expect(validateSavePayload(nightFight)).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 3.1 — hardening regressions (independent code review findings)
+// ---------------------------------------------------------------------------
+
+describe("Phase 3.1 — hearth_level: invalid PRESENT values rejected", () => {
+  let base: Record<string, unknown>;
+  beforeEach(() => {
+    installStorage();
+    base = makeValidPayload();
+  });
+
+  const reject = (mutate: (p: Record<string, unknown>) => void) => {
+    const payload = clone(base);
+    mutate(payload);
+    return validateSavePayload(payload);
+  };
+
+  const setHearth = (value: unknown) => (p: Record<string, unknown>) => {
+    (p.progression_flags as Record<string, unknown>).hearth_level = value;
+  };
+
+  test("hearth_level 0 rejected", () => {
+    expect(reject(setHearth(0))).toBe(false);
+  });
+
+  test("hearth_level 4 rejected", () => {
+    expect(reject(setHearth(4))).toBe(false);
+  });
+
+  test("fractional hearth_level rejected", () => {
+    expect(reject(setHearth(2.5))).toBe(false);
+  });
+
+  test("NaN hearth_level rejected", () => {
+    expect(reject(setHearth(Number.NaN))).toBe(false);
+  });
+
+  test("Infinity hearth_level rejected", () => {
+    expect(reject(setHearth(Number.POSITIVE_INFINITY))).toBe(false);
+  });
+
+  test("Infinity hearth_level rejected via the raw JSON text route", () => {
+    // JSON has no NaN literal — 1e999 parses to Infinity (mirrors the
+    // corrupted-file route the audit used for day_count).
+    const raw = JSON.stringify(base).replace(
+      '"hearth_level":2',
+      '"hearth_level":1e999',
+    );
+    expect(raw).toContain("1e999"); // mutation actually applied
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const pf = parsed.progression_flags as Record<string, unknown>;
+    expect(pf.hearth_level).toBe(Number.POSITIVE_INFINITY);
+    expect(validateSavePayload(parsed)).toBe(false);
+  });
+
+  test("non-numeric hearth_level (string) rejected", () => {
+    expect(reject(setHearth("2"))).toBe(false);
+  });
+});
+
+describe("Phase 3.1 — hearth_level: valid values and absence accepted", () => {
+  beforeEach(() => {
+    installStorage();
+  });
+
+  test("hearth_level 1, 2 and 3 accepted", () => {
+    for (const level of [1, 2, 3]) {
+      const payload = makeValidPayload();
+      (payload.progression_flags as Record<string, unknown>).hearth_level =
+        level;
+      expect(validateSavePayload(payload)).toBe(true);
+    }
+  });
+
+  test("absent hearth_level stays optional (Godot injects the default at load)", () => {
+    // Godot SaveManager.gd:165-166 injects hearth_level = 1 AFTER parse and
+    // BEFORE validate, so absent is a legitimate pre-load shape. The web
+    // validator mirrors that by keeping the field optional; the default is
+    // applied by the restore path (tested in save-load.test.ts).
+    const payload = makeValidPayload();
+    delete (payload.progression_flags as Record<string, unknown>).hearth_level;
+    expect(validateSavePayload(payload)).toBe(true);
+  });
+});
+
+describe("Phase 3.1 — building type: non-string values rejected", () => {
+  let base: Record<string, unknown>;
+  beforeEach(() => {
+    installStorage();
+    base = makeValidPayload();
+  });
+
+  const reject = (mutate: (p: Record<string, unknown>) => void) => {
+    const payload = clone(base);
+    mutate(payload);
+    return validateSavePayload(payload);
+  };
+
+  const wallOf = (p: Record<string, unknown>) =>
+    (p.buildings as Array<Record<string, unknown>>).find(
+      (b) => b.id === "wall_east_01",
+    ) as Record<string, unknown>;
+
+  test("numeric type rejected", () => {
+    expect(
+      reject((p) => {
+        wallOf(p).type = 123;
+      }),
+    ).toBe(false);
+  });
+
+  test("boolean type rejected", () => {
+    expect(
+      reject((p) => {
+        wallOf(p).type = true;
+      }),
+    ).toBe(false);
+  });
+
+  test("null type rejected", () => {
+    expect(
+      reject((p) => {
+        wallOf(p).type = null;
+      }),
+    ).toBe(false);
+  });
+
+  test("array type rejected", () => {
+    expect(
+      reject((p) => {
+        wallOf(p).type = ["wooden_wall"];
+      }),
+    ).toBe(false);
+  });
+
+  test("object type rejected", () => {
+    expect(
+      reject((p) => {
+        wallOf(p).type = { name: "wooden_wall" };
+      }),
+    ).toBe(false);
+  });
+
+  test("unknown string type rejected", () => {
+    expect(
+      reject((p) => {
+        wallOf(p).type = "castle";
+      }),
+    ).toBe(false);
+  });
+
+  test("standalone validator rejects the numeric-type dict too", () => {
+    expect(
+      isValidSavedBuildingDict({
+        id: "wall_east_01",
+        type: 123, // previously coerced to "wooden_wall" and accepted
+        state: "COMPLETED",
+        durability: 100,
+        level: 1,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("Phase 3.1 — building type: valid values and absence fallback", () => {
+  beforeEach(() => {
+    installStorage();
+  });
+
+  const wallOf = (p: Record<string, unknown>) =>
+    (p.buildings as Array<Record<string, unknown>>).find(
+      (b) => b.id === "wall_east_01",
+    ) as Record<string, unknown>;
+
+  test("valid wooden_wall accepted", () => {
+    const payload = makeValidPayload();
+    expect(validateSavePayload(payload)).toBe(true);
+    expect(wallOf(payload).type).toBe("wooden_wall");
+  });
+
+  test("valid stone_wall (level 2) accepted on a wall plot", () => {
+    const payload = makeValidPayload();
+    const wall = wallOf(payload);
+    wall.type = "stone_wall";
+    wall.level = 2;
+    wall.max_durability = 260;
+    wall.durability = 260;
+    expect(validateSavePayload(payload)).toBe(true);
+  });
+
+  test("valid watchtower and farm_plot types accepted on their plots", () => {
+    const payload = makeValidPayload();
+    const buildings = payload.buildings as Array<Record<string, unknown>>;
+    expect(
+      buildings.some((b) => b.id === "watchtower_east_01" && b.type === "watchtower"),
+    ).toBe(true);
+    expect(
+      buildings.some((b) => b.id === "farm_west_01" && b.type === "farm_plot"),
+    ).toBe(true);
+    expect(validateSavePayload(payload)).toBe(true);
+  });
+
+  test("absent type on a wall plot accepted (wooden_wall fallback preserved)", () => {
+    const payload = makeValidPayload();
+    delete wallOf(payload).type;
+    expect(validateSavePayload(payload)).toBe(true);
+  });
+
+  test("absent type on a farm plot still rejected by the per-plot whitelist", () => {
+    // The fallback maps an absent type to "wooden_wall", which is not
+    // allowed on farm plots — unchanged existing behavior.
+    const payload = makeValidPayload();
+    const farm = (payload.buildings as Array<Record<string, unknown>>).find(
+      (b) => b.id === "farm_west_01",
+    ) as Record<string, unknown>;
+    delete farm.type;
+    expect(validateSavePayload(payload)).toBe(false);
+  });
+});

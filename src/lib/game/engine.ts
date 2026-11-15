@@ -77,6 +77,9 @@ const smoothstep = (edge0: number, edge1: number, x: number) => {
 
 const COST_EMPTY = {} as Partial<Record<ResourceId, number>>;
 
+/** Godot EconomyLedger.VALID_RESOURCES — the only spendable/addable ids. */
+const VALID_RESOURCE_IDS: readonly ResourceId[] = ["gold", "wood", "stone"];
+
 export class GameEngine {
   // --- callbacks ---
   hooks: EngineHooks;
@@ -284,17 +287,62 @@ export class GameEngine {
     return { gold: this.gold, wood: this.wood, stone: this.stone };
   }
 
-  private canSpend(cost: Partial<Record<ResourceId, number>>): boolean {
+  /**
+   * Phase 3.1 — shared cost validation, ported from Godot EconomyLedger
+   * (try_spend Phase 1 / can_afford): a cost is valid only when it is
+   * non-empty, references only known resource ids, and every amount is a
+   * finite exact integer > 0. Entries are aggregated per resource so no
+   * malformed input can dodge the balance comparison. Returns the
+   * normalized aggregate, or null when any entry is invalid.
+   */
+  private validateCost(
+    cost: Partial<Record<ResourceId, number>>,
+  ): Partial<Record<ResourceId, number>> | null {
+    if (!cost || Object.keys(cost).length === 0) return null;
+    const normalized: Partial<Record<ResourceId, number>> = {};
+    for (const [k, v] of Object.entries(cost) as Array<
+      [ResourceId, number]
+    >) {
+      if (!VALID_RESOURCE_IDS.includes(k)) return null;
+      if (!isExactIntValue(v)) return null; // non-number / NaN / ±Infinity / fractional
+      const amount = Math.round(v);
+      if (amount <= 0) return null; // zero and negative amounts
+      normalized[k] = (normalized[k] ?? 0) + amount;
+    }
+    return normalized;
+  }
+
+  /** Balance comparison over an already-validated cost aggregate. */
+  private costAffordable(
+    normalized: Partial<Record<ResourceId, number>>,
+  ): boolean {
     const b = this.balances();
-    return (Object.entries(cost) as Array<[ResourceId, number]>).every(
-      ([k, v]) => (b[k] ?? 0) >= (v ?? 0),
+    return (Object.entries(normalized) as Array<[ResourceId, number]>).every(
+      ([k, v]) => b[k] >= (v as number),
     );
   }
 
+  private canSpend(cost: Partial<Record<ResourceId, number>>): boolean {
+    // Godot can_afford(): identical entry validation to try_spend() plus the
+    // balance comparison, so UI affordability can never disagree with the
+    // transaction rules.
+    const normalized = this.validateCost(cost);
+    return normalized !== null && this.costAffordable(normalized);
+  }
+
   trySpend(cost: Partial<Record<ResourceId, number>>): boolean {
+    // Godot try_spend(): Phase 1 validates the ENTIRE cost before any
+    // balance is touched (atomic invariant) — empty costs, unknown resource
+    // ids, zero/negative/fractional/non-finite amounts are all rejected, so
+    // a rejected spend can never increase a balance or mint fractional
+    // resources. Phase 2 commits the per-resource aggregate deductions.
     if (!this.canSpend(cost)) return false;
-    for (const [k, v] of Object.entries(cost) as Array<[ResourceId, number]>) {
-      this[k] -= v;
+    const normalized = this.validateCost(cost);
+    if (normalized === null) return false; // unreachable after canSpend
+    for (const [k, v] of Object.entries(normalized) as Array<
+      [ResourceId, number]
+    >) {
+      this[k] -= v as number;
     }
     return true;
   }
@@ -2666,7 +2714,17 @@ export class GameEngine {
     this.reign = (["ACTIVE", "BREACH_PENALTY", "ISLAND_CLEARED"].includes(reign)
       ? reign
       : "ACTIVE") as ReignState;
-    this.hearthLevel = clamp(Math.round(Number(flags.hearth_level)), 1, HEARTH_TIERS.length);
+    // Phase 3.1 — hearth_level restore (Godot SaveManager.gd:165-166): the
+    // load path injects hearth_level = 1 when the flag is absent (the
+    // flags.get("hearth_level", 1) posture) and validates only PRESENT
+    // values. validateSavePayload() above already rejects invalid present
+    // values, so the only remaining hazard was absence: Number(undefined)
+    // produced NaN and the clamp could not repair it. Default to level 1
+    // here — NaN can never enter hearthLevel.
+    const savedHearth = flags.hearth_level;
+    this.hearthLevel = isExactIntValue(savedHearth)
+      ? clamp(savedHearth, 1, HEARTH_TIERS.length)
+      : 1;
     const boost = Number(flags.hearth_boost_remaining ?? 0);
     this.hearthBoost = Number.isFinite(boost)
       ? clamp(boost, 0, HEARTH.BOOST_DURATION_SEC)
@@ -2749,7 +2807,9 @@ export class GameEngine {
       if (!p) continue;
       p.state = String(b.state) as PlotState;
       p.level = clamp(Math.round(Number(b.level ?? 1)), 1, 2);
-      p.type = String(b.type ?? p.type);
+      // Phase 3.1: no blind String() coercion — validation guarantees a
+      // present type is a string; an absent type keeps the plot seed default.
+      p.type = typeof b.type === "string" ? b.type : p.type;
       p.progress = clamp(Number(b.progress ?? 0), 0, 1);
       p.maxDurability = Math.max(1, Math.round(Number(b.max_durability ?? p.maxDurability)));
       p.durability = clamp(Math.round(Number(b.durability ?? 0)), 0, p.maxDurability);

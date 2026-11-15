@@ -5,6 +5,7 @@ import { describe, test, expect, beforeEach } from "bun:test";
 import { installStorage, makeEngine } from "./helpers";
 import { MAX_RESOURCE_CAP } from "../../src/lib/game/save-validation";
 import type { GameEngine } from "../../src/lib/game/engine";
+import type { ResourceId } from "../../src/lib/game/types";
 
 describe("B8 — tryAdd cap parity", () => {
   let engine: GameEngine;
@@ -146,5 +147,170 @@ describe("B8 — economy flows that consume the ledger stay functional", () => {
     expect(engine.trySpend({ gold: 3 })).toBe(false);
     expect(engine.trySpend({ gold: 2 })).toBe(true);
     expect(engine.gold).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3.1 — trySpend/canSpend hardening (EconomyLedger.try_spend parity)
+// ---------------------------------------------------------------------------
+
+describe("Phase 3.1 — trySpend cost validation", () => {
+  let engine: GameEngine;
+
+  beforeEach(() => {
+    installStorage();
+    engine = makeEngine().engine;
+    engine.newGame();
+    engine.gold = 10;
+    engine.wood = 10;
+    engine.stone = 10;
+  });
+
+  test("empty cost object rejected", () => {
+    expect(engine.trySpend({})).toBe(false);
+    expect(engine.gold).toBe(10);
+    expect(engine.wood).toBe(10);
+    expect(engine.stone).toBe(10);
+  });
+
+  test("unknown resource id rejected and leaves balances unchanged", () => {
+    const bad = { food: 5 } as unknown as Partial<Record<ResourceId, number>>;
+    expect(engine.trySpend(bad)).toBe(false);
+    // Prototype-chain keys must not pass as resource ids either.
+    const proto = {
+      toString: 5,
+    } as unknown as Partial<Record<ResourceId, number>>;
+    expect(engine.trySpend(proto)).toBe(false);
+    expect(engine.gold).toBe(10);
+    expect(engine.wood).toBe(10);
+    expect(engine.stone).toBe(10);
+  });
+
+  test("zero amounts rejected", () => {
+    expect(engine.trySpend({ gold: 0 })).toBe(false);
+    expect(engine.trySpend({ gold: 5, wood: 0 })).toBe(false); // one bad entry poisons the bundle
+    expect(engine.gold).toBe(10);
+    expect(engine.wood).toBe(10);
+  });
+
+  test("negative amounts rejected and can never increase a balance", () => {
+    expect(engine.trySpend({ gold: -5 })).toBe(false);
+    expect(engine.gold).toBe(10); // NOT 15
+    expect(engine.trySpend({ gold: 1, wood: -2 })).toBe(false);
+    expect(engine.gold).toBe(10); // valid entry must not commit either (atomic)
+    expect(engine.wood).toBe(10);
+  });
+
+  test("fractional amounts rejected and can never create fractional balances", () => {
+    expect(engine.trySpend({ stone: 2.5 })).toBe(false);
+    expect(engine.stone).toBe(10); // NOT 7.5
+    expect(engine.trySpend({ gold: 1, wood: 1.5 })).toBe(false);
+    expect(engine.gold).toBe(10);
+    expect(engine.wood).toBe(10);
+    expect(Number.isInteger(engine.gold)).toBe(true);
+    expect(Number.isInteger(engine.wood)).toBe(true);
+    expect(Number.isInteger(engine.stone)).toBe(true);
+  });
+
+  test("non-finite amounts rejected", () => {
+    expect(engine.trySpend({ gold: Number.NaN })).toBe(false);
+    expect(engine.trySpend({ gold: Number.POSITIVE_INFINITY })).toBe(false);
+    expect(engine.trySpend({ gold: Number.NEGATIVE_INFINITY })).toBe(false);
+    expect(engine.gold).toBe(10);
+  });
+
+  test("valid multi-resource spend commits every deduction atomically", () => {
+    expect(engine.trySpend({ gold: 3, wood: 4, stone: 2 })).toBe(true);
+    expect(engine.gold).toBe(7);
+    expect(engine.wood).toBe(6);
+    expect(engine.stone).toBe(8);
+  });
+
+  test("spend beyond the balance is rejected with balances unchanged", () => {
+    expect(engine.trySpend({ gold: 11 })).toBe(false);
+    expect(engine.trySpend({ gold: 5, wood: 11 })).toBe(false);
+    expect(engine.gold).toBe(10);
+    expect(engine.wood).toBe(10);
+  });
+
+  test("normal gameplay costs still spend correctly", () => {
+    // Wall plot build cost (2G 4W 2S) and shipwreck stage 1 (2G 3W 1S).
+    expect(engine.trySpend({ gold: 2, wood: 4, stone: 2 })).toBe(true);
+    expect(engine.gold).toBe(8);
+    expect(engine.wood).toBe(6);
+    expect(engine.stone).toBe(8);
+    expect(engine.trySpend({ gold: 2, wood: 3, stone: 1 })).toBe(true);
+    expect(engine.gold).toBe(6);
+    expect(engine.wood).toBe(3);
+    expect(engine.stone).toBe(7);
+  });
+
+  test("hearth upgrade spend path still works (non-empty tier costs)", () => {
+    engine.gold = 4;
+    engine.wood = 4;
+    engine.stone = 2;
+    const res = engine.tryUpgradeHearth(0); // HEARTH.X = 0
+    expect(res.ok).toBe(true);
+    expect(engine.hearthLevel).toBe(2);
+    expect(engine.gold).toBe(0);
+    expect(engine.wood).toBe(0);
+    expect(engine.stone).toBe(0);
+  });
+});
+
+describe("Phase 3.1 — canSpend agrees with the transaction rules", () => {
+  let engine: GameEngine;
+  let canSpend: (cost: Partial<Record<ResourceId, number>>) => boolean;
+
+  beforeEach(() => {
+    installStorage();
+    engine = makeEngine().engine;
+    engine.newGame();
+    engine.gold = 10;
+    engine.wood = 10;
+    engine.stone = 10;
+    // canSpend is the private affordability gate — exercise it directly so
+    // UI affordability can never drift from the transaction rules.
+    canSpend = (cost) =>
+      (
+        engine as unknown as {
+          canSpend: (c: Partial<Record<ResourceId, number>>) => boolean;
+        }
+      ).canSpend(cost);
+  });
+
+  test("affordable valid cost → true; trySpend then succeeds", () => {
+    expect(canSpend({ gold: 3, wood: 4, stone: 2 })).toBe(true);
+    expect(engine.trySpend({ gold: 3, wood: 4, stone: 2 })).toBe(true);
+  });
+
+  test("unaffordable valid cost → false; trySpend also fails", () => {
+    expect(canSpend({ gold: 11 })).toBe(false);
+    expect(engine.trySpend({ gold: 11 })).toBe(false);
+  });
+
+  test("invalid costs are false regardless of balance", () => {
+    expect(canSpend({})).toBe(false);
+    expect(canSpend({ gold: 0 })).toBe(false);
+    expect(canSpend({ gold: -1 })).toBe(false);
+    expect(canSpend({ gold: 1.5 })).toBe(false);
+    expect(canSpend({ gold: Number.NaN })).toBe(false);
+    expect(
+      canSpend({ food: 1 } as unknown as Partial<Record<ResourceId, number>>),
+    ).toBe(false);
+    // ...and trySpend mirrors every one of them.
+    expect(engine.trySpend({})).toBe(false);
+    expect(engine.trySpend({ gold: 0 })).toBe(false);
+    expect(engine.trySpend({ gold: -1 })).toBe(false);
+    expect(engine.trySpend({ gold: 1.5 })).toBe(false);
+    expect(engine.trySpend({ gold: Number.NaN })).toBe(false);
+    expect(
+      engine.trySpend({
+        food: 1,
+      } as unknown as Partial<Record<ResourceId, number>>),
+    ).toBe(false);
+    expect(engine.gold).toBe(10);
+    expect(engine.wood).toBe(10);
+    expect(engine.stone).toBe(10);
   });
 });
