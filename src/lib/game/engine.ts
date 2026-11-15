@@ -37,6 +37,12 @@ import {
   WEST_WALL_ID,
   WORLD,
 } from "./data";
+import {
+  MAX_RESOURCE_CAP,
+  isExactIntValue,
+  parseSaveJson,
+  validateSavePayload,
+} from "./save-validation";
 import type {
   ActiveTarget,
   Agent,
@@ -294,21 +300,37 @@ export class GameEngine {
   }
 
   tryAdd(res: ResourceId, amount: number): boolean {
-    if (!Number.isFinite(amount) || amount < 0) return false;
-    this[res] += Math.round(amount);
+    // Parity with EconomyLedger.try_add (Godot): exact integer amounts only,
+    // strictly positive, and the 999,999 resource cap is enforced on every
+    // add. Rejection is atomic — the balance is never partially changed.
+    if (!isExactIntValue(amount)) return false;
+    const intAmount = Math.round(amount);
+    if (intAmount <= 0) return false;
+    if (this[res] + intAmount > MAX_RESOURCE_CAP) return false;
+    this[res] += intAmount;
     return true;
   }
 
   tryAddBundle(bundle: Partial<Record<ResourceId, number>>): boolean {
-    const staged = this.balances();
+    // Parity with EconomyLedger.try_add_bundle (Godot): the complete
+    // transaction is validated (exact positive integers, aggregate cap per
+    // resource) before any balance is committed. An invalid bundle must not
+    // partially commit.
+    if (!bundle || Object.keys(bundle).length === 0) return false;
+    const staged: Partial<Record<ResourceId, number>> = {};
     for (const [k, v] of Object.entries(bundle) as Array<
       [ResourceId, number]
     >) {
-      staged[k] += v;
+      if (!isExactIntValue(v)) return false;
+      const amount = Math.round(v);
+      if (amount <= 0) return false;
+      const totalForRes = (staged[k] ?? 0) + amount;
+      if (this[k] + totalForRes > MAX_RESOURCE_CAP) return false;
+      staged[k] = totalForRes;
     }
-    this.gold = staged.gold;
-    this.wood = staged.wood;
-    this.stone = staged.stone;
+    for (const k of Object.keys(staged) as ResourceId[]) {
+      this[k] += staged[k] as number;
+    }
     return true;
   }
 
@@ -1146,10 +1168,15 @@ export class GameEngine {
   }
 
   private tickIdleBuilder(a: Agent, dt: number) {
-    const canChop =
-      !this.nightActive &&
-      this.phase === "daylight" &&
-      Math.abs(a.x - NPC.SAFE_ZONE_X) <= NPC.WORK_RANGE;
+    // Parity with NPCBuilderAgent.gd _tick_idle_builder (source of truth):
+    // can_chop = resource/ledger present AND not night_active AND not
+    // safety_override_active. There is NO position gate in Godot — the
+    // previous safe-zone proximity term here deadlocked builders at the
+    // boundary and made auto-chop unreachable for any distant renewable
+    // wood node (audit B1). Dusk/night safety is enforced separately by the
+    // safety-override branch in tickAgents, exactly like Godot's
+    // safety_override_active path.
+    const canChop = !this.nightActive && this.phase === "daylight";
     if (canChop) {
       const node = this.findNearestAvailable(a.x, Infinity, "wood", true);
       if (node) {
@@ -2429,14 +2456,34 @@ export class GameEngine {
   // ==========================================================================
 
   refreshHasSave() {
+    // B3 parity with Main.gd refresh_continue_state(): the Continue button is
+    // enabled only when at least one VALID primary or backup save exists —
+    // mere key existence is not enough. Pure check: reads storage, parses and
+    // validates candidates, never mutates active game state.
+    this.hasSaveCache = this.hasAnyValidSave();
+  }
+
+  private readStorage(key: string): string | null {
     try {
-      this.hasSaveCache = Boolean(
-        typeof window !== "undefined" &&
-          (localStorage.getItem(SAVE_KEY) ?? localStorage.getItem(SAVE_BACKUP_KEY)),
-      );
+      return localStorage.getItem(key);
     } catch {
-      this.hasSaveCache = false;
+      return null;
     }
+  }
+
+  /** Parse + validate one storage candidate without side effects. */
+  private readValidSaveCandidate(key: string): Record<string, unknown> | null {
+    const raw = this.readStorage(key);
+    if (raw === null) return null;
+    const data = parseSaveJson(raw);
+    return data !== null && validateSavePayload(data) ? data : null;
+  }
+
+  private hasAnyValidSave(): boolean {
+    return (
+      this.readValidSaveCandidate(SAVE_KEY) !== null ||
+      this.readValidSaveCandidate(SAVE_BACKUP_KEY) !== null
+    );
   }
 
   get hasSave(): boolean {
@@ -2510,11 +2557,27 @@ export class GameEngine {
 
   saveGame(): boolean {
     try {
-      const payload = JSON.stringify(this.buildSavePayload());
-      const existing = localStorage.getItem(SAVE_KEY);
-      if (existing) localStorage.setItem(SAVE_BACKUP_KEY, existing);
+      const payloadObj = this.buildSavePayload();
+      // Parity with SaveManager.save_state (Godot): reject payloads that fail
+      // schema validation BEFORE any write happens.
+      if (!validateSavePayload(payloadObj)) return false;
+      const payload = JSON.stringify(payloadObj);
+
+      // B5 parity with SaveManager.save_state step 2: the backup slot is
+      // staged only from a VALID existing primary. A corrupt primary must
+      // never overwrite a good backup, and when the primary is invalid the
+      // existing backup is preserved untouched. If either write fails, the
+      // previous known-good pair survives (writes go backup-first, and the
+      // new primary write is last).
+      const existingRaw = this.readStorage(SAVE_KEY);
+      if (existingRaw !== null) {
+        const existingData = parseSaveJson(existingRaw);
+        if (existingData !== null && validateSavePayload(existingData)) {
+          localStorage.setItem(SAVE_BACKUP_KEY, existingRaw);
+        }
+      }
       localStorage.setItem(SAVE_KEY, payload);
-      this.hasSaveCache = true;
+      this.refreshHasSave();
       return true;
     } catch {
       return false;
@@ -2522,91 +2585,72 @@ export class GameEngine {
   }
 
   loadGame(): boolean {
-    let raw: string | null = null;
+    // B2/B6 parity with SaveManager.gd load_state() (source of truth):
+    //   1. Read the primary save.
+    //   2. Parse AND validate it (JSON parse success != valid save).
+    //   3. If missing, malformed or schema-invalid, attempt the backup.
+    //   4. Parse and validate the backup independently.
+    //   5. Apply only a valid payload (applySavePayload re-validates before
+    //      any mutation, so the live game is never touched by a bad candidate).
+    //   6. When backup recovery succeeds, self-heal the primary from the
+    //      verified backup payload; a failed heal write must not invalidate
+    //      the otherwise-successful load.
+    //   7. If both saves are invalid, fail safely without changing state.
+    let loaded: Record<string, unknown> | null =
+      this.readValidSaveCandidate(SAVE_KEY);
     let recoveredFromBackup = false;
-    try {
-      raw = localStorage.getItem(SAVE_KEY);
-      if (!raw) {
-        raw = localStorage.getItem(SAVE_BACKUP_KEY);
-        recoveredFromBackup = raw != null;
-      }
-    } catch {
-      raw = null;
-    }
-    if (!raw) return false;
 
-    let data: Record<string, unknown>;
-    try {
-      data = JSON.parse(raw) as Record<string, unknown>;
-    } catch {
-      // primary corrupted — try backup
-      try {
-        const bak = localStorage.getItem(SAVE_BACKUP_KEY);
-        if (bak) {
-          data = JSON.parse(bak) as Record<string, unknown>;
-          recoveredFromBackup = true;
-        } else {
-          return false;
-        }
-      } catch {
-        return false;
-      }
+    if (loaded === null) {
+      loaded = this.readValidSaveCandidate(SAVE_BACKUP_KEY);
+      recoveredFromBackup = loaded !== null;
     }
 
-    const ok = this.applySavePayload(data);
-    if (ok && recoveredFromBackup) {
+    if (loaded === null) return false;
+
+    const ok = this.applySavePayload(loaded);
+    if (!ok) return false;
+
+    if (recoveredFromBackup) {
       this.hooks.message("Save file was corrupted — recovered from backup");
+      // Self-heal (Godot _restore_from_backup_file): rewrite the primary from
+      // the verified backup payload. Best-effort — quota/write failures here
+      // leave the load result untouched (the backup still holds the data).
+      try {
+        localStorage.setItem(SAVE_KEY, JSON.stringify(loaded));
+      } catch {
+        // ignore: healing is an optimization, not a correctness requirement
+      }
     }
-    if (ok) {
-      this.started = true;
-      this.paused = false;
-      const unsafe = this.phase !== "daylight";
-      if (unsafe) this.setDuskSafety(true);
-      this.hooks.message(
-        recoveredFromBackup
-          ? "Loaded saved kingdom state from backup"
-          : "Loaded saved kingdom state from browser storage (slot 0)",
-      );
-    }
-    return ok;
+
+    this.started = true;
+    this.paused = false;
+    const unsafe = this.phase !== "daylight";
+    if (unsafe) this.setDuskSafety(true);
+    this.hooks.message(
+      recoveredFromBackup
+        ? "Loaded saved kingdom state from backup"
+        : "Loaded saved kingdom state from browser storage (slot 0)",
+    );
+    this.refreshHasSave();
+    return true;
   }
 
   private applySavePayload(data: Record<string, unknown>): boolean {
-    if (typeof data.day_count !== "number" || data.day_count < 1) return false;
-    if (typeof data.world_phase !== "string") return false;
-    if (!["daylight", "sunset", "night"].includes(data.world_phase)) return false;
+    // B4: complete pre-mutation validation — ported from
+    // SaveManager.gd validate_payload() plus the per-manager validators
+    // (is_valid_saved_building_dict / is_valid_saved_npc_dict /
+    // is_valid_saved_encounter_dict / is_valid_saved_tree_states).
+    // Everything semantically invalid (non-finite numbers, fractional ints,
+    // bad ids, state/durability inconsistency, duplicate ids, invalid
+    // encounter fields, out-of-range progression) is rejected BEFORE
+    // resetState() mutates the live game. The pure validator is the single
+    // source of truth for what is acceptable.
+    if (!validateSavePayload(data)) return false;
 
-    const res = data.resources as Partial<Record<ResourceId, number>> | undefined;
-    if (!res || typeof res.gold !== "number") return false;
-
-    const buildings = data.buildings as Array<Record<string, unknown>> | undefined;
-    if (!Array.isArray(buildings) || buildings.length === 0) return false;
-    for (const b of buildings) {
-      if (typeof b.id !== "string" || !this.plots.has(b.id)) return false;
-      const st = String(b.state);
-      if (
-        !["PLACEHOLDER", "UNDER_CONSTRUCTION", "COMPLETED", "DAMAGED", "DESTROYED"].includes(st)
-      )
-        return false;
-      const dur = Number(b.durability ?? 0);
-      const maxDur = Number(b.max_durability ?? 1);
-      if (!Number.isFinite(dur) || dur < 0 || dur > maxDur) return false;
-      const prog = Number(b.progress ?? 0);
-      if (!Number.isFinite(prog) || prog < 0 || prog > 1) return false;
-    }
-
-    const npcs = data.npcs as Array<Record<string, unknown>> | undefined;
-    if (!Array.isArray(npcs) || npcs.length === 0 || npcs.length > POP.MAX_POPULATION)
-      return false;
-    for (const n of npcs) {
-      if (!["builder", "farmer", "archer", "villager"].includes(String(n.role)))
-        return false;
-      const px = Number(n.position_x ?? 0);
-      if (px < WORLD.MIN_PLAYABLE_X || px > WORLD.MAX_PLAYABLE_X) return false;
-    }
-
-    const flags = data.progression_flags as Record<string, unknown> | undefined;
-    if (!flags || typeof flags.hearth_level !== "number") return false;
+    const res = data.resources as Partial<Record<ResourceId, number>>;
+    const buildings = data.buildings as Array<Record<string, unknown>>;
+    const npcs = data.npcs as Array<Record<string, unknown>>;
+    const flags = data.progression_flags as Record<string, unknown>;
 
     // --- restore ---
     this.resetState();
