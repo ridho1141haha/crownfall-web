@@ -41,6 +41,14 @@ export interface Plot {
   harvestInterval?: number;
   goldYield?: number;
   upgradeThornDamage?: number;
+  /** Data-driven display config (mirrors buildings.json title/cost_label). */
+  title?: string;
+  costLabel?: string;
+  /** Data-driven Stone Tier 2 upgrade config (walls only). */
+  upgradeCost?: Partial<Record<ResourceId, number>>;
+  upgradeMaxDurability?: number;
+  upgradeTargetType?: string;
+  upgradeCostLabel?: string;
   claimedBy: string;
 }
 
@@ -94,6 +102,16 @@ export interface FloatText {
   age: number;
 }
 
+/** Flying payment particle (resource/gold flying from actor to target). */
+export interface PaymentDot {
+  id: number;
+  fromX: number;
+  toX: number;
+  resource: ResourceId;
+  age: number;
+  delay: number;
+}
+
 export interface ActiveTarget {
   hasTarget: boolean;
   kind: string;
@@ -138,5 +156,6 @@ export interface Snapshot {
     state: NpcState;
     recruited: boolean;
   }>;
+  era: string;
   hasSave: boolean;
 }

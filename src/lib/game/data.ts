@@ -1,6 +1,6 @@
 // Crownfall: The Last Light — game data & constants
 // Faithfully ported from data/*.json and GDScript constants of the original
-// Godot 4 project (github.com/ridho1141haha/crownfall), v1.4.2.
+// Godot 4 project (github.com/ridho1141haha/crownfall), v1.4.3.
 
 import type {
   EnemyArchetype,
@@ -135,6 +135,20 @@ export const STONE_WALL_UPGRADE_COST: Partial<Record<ResourceId, number>> = {
 };
 export const STONE_WALL_MAX_DURABILITY = 260;
 
+// EraProgressionManager.gd + data/eras.json
+export const KNOWN_ERA_IDS = [
+  "wood_age",
+  "stone_age",
+  "iron_age",
+] as const;
+export type EraId = (typeof KNOWN_ERA_IDS)[number];
+
+export const ERAS: Array<{ id: EraId; name: string }> = [
+  { id: "wood_age", name: "Wood Age" },
+  { id: "stone_age", name: "Stone Age" },
+  { id: "iron_age", name: "Iron Age" },
+];
+
 type PlotSeed = Omit<Plot, "level" | "state" | "progress" | "claimedBy"> & {
   level?: number;
 };
@@ -149,6 +163,16 @@ export const PLOT_SEEDS: PlotSeed[] = [
     buildDuration: 4.0,
     buildCost: { gold: 2, wood: 4, stone: 2 },
     repairCost: { wood: 2, stone: 1 },
+    title: "Wall Plot",
+    costLabel: "2G 4W 2S",
+    upgradeCost: {
+      gold: 3,
+      wood: 2,
+      stone: 5,
+    },
+    upgradeCostLabel: "3G 2W 5S",
+    upgradeMaxDurability: STONE_WALL_MAX_DURABILITY,
+    upgradeTargetType: "stone_wall",
     upgradeThornDamage: 20,
   },
   {
@@ -160,6 +184,8 @@ export const PLOT_SEEDS: PlotSeed[] = [
     buildDuration: 3.5,
     buildCost: { gold: 3, wood: 3, stone: 3 },
     repairCost: { wood: 2, stone: 1 },
+    title: "Watchtower",
+    costLabel: "3G 3W 3S",
     supportDamage: 10,
   },
   {
@@ -171,6 +197,8 @@ export const PLOT_SEEDS: PlotSeed[] = [
     buildDuration: 3.5,
     buildCost: { gold: 3, wood: 4 },
     repairCost: { wood: 2 },
+    title: "Farm Plot",
+    costLabel: "3G 4W",
     harvestInterval: 60.0,
     goldYield: 2,
   },
@@ -183,6 +211,8 @@ export const PLOT_SEEDS: PlotSeed[] = [
     buildDuration: 3.5,
     buildCost: { gold: 3, wood: 4 },
     repairCost: { wood: 2 },
+    title: "Farm Plot",
+    costLabel: "3G 4W",
     harvestInterval: 60.0,
     goldYield: 2,
   },
@@ -195,6 +225,16 @@ export const PLOT_SEEDS: PlotSeed[] = [
     buildDuration: 4.0,
     buildCost: { gold: 2, wood: 4, stone: 2 },
     repairCost: { wood: 2, stone: 1 },
+    title: "West Wall",
+    costLabel: "2G 4W 2S",
+    upgradeCost: {
+      gold: 3,
+      wood: 2,
+      stone: 5,
+    },
+    upgradeCostLabel: "3G 2W 5S",
+    upgradeMaxDurability: STONE_WALL_MAX_DURABILITY,
+    upgradeTargetType: "stone_wall",
     upgradeThornDamage: 20,
   },
 ];

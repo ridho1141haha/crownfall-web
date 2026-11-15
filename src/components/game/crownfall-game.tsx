@@ -62,6 +62,7 @@ export default function CrownfallGame() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [screen, setScreen] = useState<"title" | "game">("title");
   const [paused, setPaused] = useState(false);
+  const [exitWarn, setExitWarn] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [victory, setVictory] = useState<{ title: string; subtitle: string } | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -290,11 +291,16 @@ export default function CrownfallGame() {
 
   const saveAndTitle = () => {
     const eng = engineRef.current;
-    if (eng) {
-      eng.manualSave();
+    const ok = eng ? eng.manualSave() : false;
+    if (ok) {
+      setExitWarn(false);
+      setPaused(false);
+      setScreen("title");
+    } else {
+      // Manual save terkunci saat malam & autosave hanya saat sunrise —
+      // minta konfirmasi eksplisit sebelum membuang progres.
+      setExitWarn(true);
     }
-    setPaused(false);
-    setScreen("title");
   };
 
   const restart = () => {
@@ -393,7 +399,7 @@ export default function CrownfallGame() {
                   <div className="flex items-center gap-1.5">
                     <PhaseIcon className={`h-4 w-4 ${phaseMeta.tint}`} aria-hidden />
                     <span className="text-sm font-semibold">
-                      Day {snap.day} · {phaseMeta.label}
+                      Day {snap.day} · {phaseMeta.label} · {snap.era}
                     </span>
                   </div>
                   {snap.timeScale > 1 && (
@@ -570,7 +576,7 @@ export default function CrownfallGame() {
                   PAUSED
                 </h3>
                 <p className="mt-1 text-center text-[11px] text-stone-400">
-                  {snap ? `Day ${snap.day} · ${phaseMeta.label} · ${snap.gold}G ${snap.wood}W ${snap.stone}S` : ""}
+                  {snap ? `Day ${snap.day} · ${phaseMeta.label} · ${snap.era} · ${snap.gold}G ${snap.wood}W ${snap.stone}S` : ""}
                 </p>
                 <div className="mt-4 flex flex-col gap-2">
                   <Button onClick={() => setPaused(false)} className="gap-2">
@@ -618,6 +624,40 @@ export default function CrownfallGame() {
                 <p className="mt-3 text-center text-[10px] text-stone-500">
                   Saves are kept in this browser (slot 0, with backup recovery).
                 </p>
+              </div>
+            </div>
+          )}
+
+          {/* ------- Unsaved progress warning (save locked at Night) ------- */}
+          {screen === "game" && paused && exitWarn && (
+            <div className="absolute inset-0 flex items-center justify-center bg-stone-950/90 backdrop-blur-sm">
+              <div className="w-full max-w-xs rounded-lg border border-amber-700/60 bg-stone-900/95 p-5 shadow-2xl">
+                <h3 className="text-center text-base font-bold tracking-widest text-amber-300">
+                  UNSAVED PROGRESS
+                </h3>
+                <p className="mt-2 text-center text-xs leading-relaxed text-stone-300">
+                  Manual save is disabled during Night combat and autosave only
+                  fires at sunrise. Progress since your last save will be lost.
+                  Return to title anyway?
+                </p>
+                <div className="mt-4 flex justify-center gap-2">
+                  <Button
+                    variant="secondary"
+                    onClick={() => setExitWarn(false)}
+                  >
+                    Stay
+                  </Button>
+                  <Button
+                    variant="destructive"
+                    onClick={() => {
+                      setExitWarn(false);
+                      setPaused(false);
+                      setScreen("title");
+                    }}
+                  >
+                    Return Anyway
+                  </Button>
+                </div>
               </div>
             </div>
           )}

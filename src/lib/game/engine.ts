@@ -7,6 +7,7 @@
 import {
   BUILDING_INTERACT_RANGE,
   ENEMY_ARCHETYPES,
+  ERAS,
   FLARE,
   FARM_EAST_ID,
   FARM_WEST_ID,
@@ -43,6 +44,7 @@ import type {
   EnemyState,
   FloatText,
   NpcRole,
+  PaymentDot,
   Phase,
   Plot,
   PlotState,
@@ -148,6 +150,9 @@ export class GameEngine {
 
   // --- FX ---
   floats: FloatText[] = [];
+  payments: PaymentDot[] = [];
+  private paymentId = 0;
+  eraIndex = 0;
   shakeTime = 0;
   shakeIntensity = 0;
   private animClock = 0;
@@ -250,6 +255,8 @@ export class GameEngine {
     this.flareCooldown = 0;
     this.staggerCooldown = 0;
     this.floats = [];
+    this.payments = [];
+    this.eraIndex = 0;
     this.refreshHasSave();
   }
 
@@ -429,7 +436,7 @@ export class GameEngine {
         "Raiders breached Town Center! Half your Gold was lost; rebuild before next dusk.",
       );
     } else {
-      this.hooks.message("Dawn of Day 3+! Forgotten Shore secured.");
+      this.hooks.message(`Dawn of Day ${this.day}! Forgotten Shore secured.`);
     }
 
     if (this.settlementBreached && this.reign !== "ISLAND_CLEARED") {
@@ -683,14 +690,76 @@ export class GameEngine {
     if (Math.abs(actorX - p.x) > BUILDING_INTERACT_RANGE) {
       return { ok: false, reason: `Move closer to Wall (x=${p.x}) to upgrade` };
     }
-    if (!this.trySpend(STONE_WALL_UPGRADE_COST)) {
-      return { ok: false, reason: "Need 3 Gold, 2 Wood, 5 Stone for Stone Wall Tier 2" };
+    // Biaya/HP/type upgrade dibaca dari konfigurasi plot (PLOT_SEEDS, cermin
+    // data/buildings.json); konstanta hanya fallback untuk plot tanpa config.
+    const upgCost = p.upgradeCost ?? STONE_WALL_UPGRADE_COST;
+    const upgMax = p.upgradeMaxDurability ?? STONE_WALL_MAX_DURABILITY;
+    if (!this.trySpend(upgCost)) {
+      return {
+        ok: false,
+        reason: `Need ${costLabel(upgCost)} for Stone Wall Tier 2`,
+      };
     }
     p.level = 2;
-    p.type = "stone_wall";
-    p.maxDurability = STONE_WALL_MAX_DURABILITY;
-    p.durability = STONE_WALL_MAX_DURABILITY;
+    p.type = p.upgradeTargetType ?? "stone_wall";
+    p.maxDurability = upgMax;
+    p.durability = upgMax;
     return { ok: true };
+  }
+
+  // --- Era progression (EraProgressionManager.gd + data/eras.json) ---
+  eraId(): string {
+    return ERAS[Math.min(this.eraIndex, ERAS.length - 1)].id;
+  }
+
+  eraName(): string {
+    return ERAS[Math.min(this.eraIndex, ERAS.length - 1)].name;
+  }
+
+  private advanceEra(target: number): boolean {
+    if (target <= this.eraIndex) return false;
+    this.eraIndex = Math.min(target, ERAS.length - 1);
+    return true;
+  }
+
+  notifyStoneWallBuilt(): boolean {
+    return this.advanceEra(1);
+  }
+
+  notifyVesselReady(): boolean {
+    return this.advanceEra(2);
+  }
+
+  private applySaveEra(id: string): void {
+    const idx = ERAS.findIndex((e) => e.id === id);
+    if (idx >= 0) this.eraIndex = idx;
+  }
+
+  private spawnPaymentFly(
+    cost: Partial<Record<ResourceId, number>>,
+    fromX: number,
+    toX: number,
+  ) {
+    // Animasi pembayaran: partikel kecil per resource terbang dari aktor
+    // menuju target yang dibayar (mirror _spawn_payment_fly di Godot).
+    let laneDelay = 0;
+    for (const res of ["gold", "wood", "stone"] as ResourceId[]) {
+      const amount = cost[res] ?? 0;
+      if (amount <= 0) continue;
+      const dots = Math.min(amount, 4);
+      for (let i = 0; i < dots; i++) {
+        this.payments.push({
+          id: this.paymentId++,
+          fromX,
+          toX,
+          resource: res,
+          age: 0,
+          delay: laneDelay + i * 0.05,
+        });
+      }
+      if (this.payments.length > 48) this.payments.splice(0, this.payments.length - 48);
+      laneDelay += 0.08;
+    }
   }
 
   requestRepair(
@@ -1636,7 +1705,9 @@ export class GameEngine {
           const rc = costLabel(p.repairCost);
           prompt = `Repair ${title} [E/F] (${rc})`;
         } else if (uCmd && !pCmd) {
-          prompt = `${title} [Q] Stone Lv2: 3G 2W 5S`;
+          const upgCost = p.upgradeCost ?? STONE_WALL_UPGRADE_COST;
+          const upgLabel = p.upgradeCostLabel ?? costLabel(upgCost);
+          prompt = `${title} [Q] Stone Lv2: ${upgLabel}`;
         } else {
           prompt = `Build ${title} [E/B] (${cost})`;
         }
@@ -1752,6 +1823,7 @@ export class GameEngine {
       case "recruit": {
         const agent = this.recruitNextVagrant(actorX);
         if (!agent) return { ok: false, reason: "Recruit failed" };
+        this.spawnPaymentFly(NPC.RECRUIT_COST, actorX, NPC.CAMP_X);
         if (agent.role === "villager") {
           this.hooks.message(
             `Recruited Villager! Assign a role at the Hammer/Scythe/Bow Stand near Town Center. Total NPCs: ${this.recruitedCount()}`,
@@ -1776,6 +1848,7 @@ export class GameEngine {
           this.hooks.sfx("build");
           const p = this.plot(resolvedTarget)!;
           this.spawnFloat(p.x, "Blueprint funded", "#9be0a6");
+          this.spawnPaymentFly(p.buildCost, actorX, p.x);
           this.hooks.message(
             `${plotTitle(resolvedTarget)} blueprint funded! Builder will construct it.`,
           );
@@ -1795,6 +1868,18 @@ export class GameEngine {
         const res = this.requestRepair(actorX, resolvedTarget, extra);
         if (res.ok) {
           this.hooks.sfx("build");
+          const repPlot = this.plot(resolvedTarget);
+          if (repPlot) {
+            const repTotal: Partial<Record<ResourceId, number>> = {
+              ...repPlot.repairCost,
+            };
+            for (const [k, v] of Object.entries(extra) as Array<
+              [ResourceId, number]
+            >) {
+              repTotal[k] = (repTotal[k] ?? 0) + v;
+            }
+            this.spawnPaymentFly(repTotal, actorX, repPlot.x);
+          }
           this.hooks.message(
             `${plotTitle(resolvedTarget)} repaired to full durability!`,
           );
@@ -1812,8 +1897,17 @@ export class GameEngine {
         const res = this.requestUpgradeWall(actorX, resolvedTarget);
         if (res.ok) {
           this.hooks.sfx("build");
+          const upgPlot = this.plot(resolvedTarget);
+          this.spawnPaymentFly(
+            upgPlot?.upgradeCost ?? STONE_WALL_UPGRADE_COST,
+            actorX,
+            upgPlot?.x ?? actorX,
+          );
+          const eraNote = this.notifyStoneWallBuilt()
+            ? " The Stone Age has begun!"
+            : "";
           this.hooks.message(
-            "Upgraded to Stone Wall Tier 2 (260 HP, 20 thorn dmg)!",
+            `Upgraded to ${plotTitle(resolvedTarget)} (${upgPlot?.maxDurability ?? STONE_WALL_MAX_DURABILITY} HP, ${this.getThornDamage(resolvedTarget)} thorn dmg)!${eraNote}`,
           );
         }
         return res;
@@ -1823,6 +1917,11 @@ export class GameEngine {
         const res = this.tryUpgradeHearth(actorX);
         if (res.ok) {
           this.hooks.sfx("build");
+          this.spawnPaymentFly(
+            HEARTH_TIERS[this.hearthLevel]?.upgradeCost ?? {},
+            actorX,
+            HEARTH.X,
+          );
           this.spawnFloat(0, `Hearth Lv.${this.hearthLevel}!`, "#ffc75a");
           this.hooks.message(
             `Hearth upgraded to Lv.${this.hearthLevel} (${this.hearthTier().name}, Light radius: ${Math.round(this.hearthRadius())} px)!`,
@@ -1835,6 +1934,7 @@ export class GameEngine {
         const res = this.tryStoke(actorX);
         if (res.ok) {
           this.hooks.sfx("sunset");
+          this.spawnPaymentFly(HEARTH.BOOST_COST, actorX, HEARTH.X);
           this.spawnFloat(0, "STOKED!", "#ffc75a");
           this.hooks.message(
             `Fire stoked! Light radius +30% and burn +2 DPS for ${HEARTH.BOOST_DURATION_SEC} seconds!`,
@@ -1869,6 +1969,7 @@ export class GameEngine {
         }
         this.shrineUsedToday = true;
         this.hooks.sfx("coin");
+        this.spawnPaymentFly(SHRINE_OFFERING.COST, actorX, SHRINE_OFFERING.X);
         this.spawnFloat(SHRINE_OFFERING.X, "+2G Offering", "#ffe074");
         this.hooks.message("Shrine Offering accepted: 4W + 2S -> +2 Gold!");
         return { ok: true };
@@ -1887,6 +1988,7 @@ export class GameEngine {
         this.flareTimer = FLARE.ACTIVE_SEC;
         this.flareCooldown = FLARE.COOLDOWN_SEC;
         this.hooks.sfx("sunset");
+        this.spawnPaymentFly(FLARE.COST, actorX, HEARTH.X);
         this.spawnFloat(actorX, "KINDLE FLARE +50%!", "#ffc75a");
         this.hooks.message(
           "Kindle Flare active! Hearth burn & Watchtower dmg +50% for 8s!",
@@ -2064,8 +2166,15 @@ export class GameEngine {
     }
     this.shipwreckStage += 1;
     this.hooks.sfx("build");
+    this.spawnPaymentFly(cost, actorX, SHIPWRECK.X);
     this.spawnFloat(SHIPWRECK.X, `Ship Stage ${this.shipwreckStage}/3`, "#9be0a6");
-    this.hooks.message(`Shipwreck repaired to Stage ${this.shipwreckStage}/3!`);
+    if (this.shipwreckStage >= 3 && this.notifyVesselReady()) {
+      this.hooks.message(
+        `Shipwreck repaired to Stage ${this.shipwreckStage}/3! The Iron Age has begun — heavy craft powers the great voyage.`,
+      );
+    } else {
+      this.hooks.message(`Shipwreck repaired to Stage ${this.shipwreckStage}/3!`);
+    }
     return { ok: true };
   }
 
@@ -2240,6 +2349,10 @@ export class GameEngine {
     // fx housekeeping (real-time)
     for (const f of this.floats) f.age += dtReal;
     this.floats = this.floats.filter((f) => f.age < 0.85);
+    for (const d of this.payments) d.age += dtReal;
+    this.payments = this.payments.filter(
+      (d) => d.age < d.delay + 0.67,
+    );
     if (this.shakeTime > 0) this.shakeTime -= dtReal;
 
     // refresh active target for prompts
@@ -2390,6 +2503,7 @@ export class GameEngine {
         shipwreck_stage: this.shipwreckStage,
         portal_relic_looted: this.portalLooted,
         shrine_offering_used_today: this.shrineUsedToday,
+        era_id: this.eraId(),
       },
     };
   }
@@ -2516,6 +2630,21 @@ export class GameEngine {
     this.shipwreckStage = clamp(Math.round(Number(flags.shipwreck_stage ?? 0)), 0, 3);
     this.portalLooted = Boolean(flags.portal_relic_looted);
     this.shrineUsedToday = Boolean(flags.shrine_offering_used_today);
+    // Era: pakai era tersimpan; save lama (sebelum sistem era) diinferensi dari
+    // bangunan batu — Iron Age tidak pernah diinferensi (hanya lewat Shipwreck 3).
+    const savedEra = String(flags.era_id ?? "");
+    if (savedEra) {
+      this.applySaveEra(savedEra);
+    } else {
+      const buildingsArr = Array.isArray(data.buildings) ? data.buildings : [];
+      const hasStoneWall = buildingsArr.some(
+        (b) =>
+          b &&
+          typeof b === "object" &&
+          (b as Record<string, unknown>).type === "stone_wall",
+      );
+      this.applySaveEra(hasStoneWall ? "stone_age" : "wood_age");
+    }
 
     const nodeStates = flags.node_states as Record<string, boolean> | undefined;
     if (nodeStates && typeof nodeStates === "object") {
@@ -2546,7 +2675,15 @@ export class GameEngine {
       this.night.archetype = (["raider", "crawler", "brute"].includes(arch)
         ? arch
         : "raider") as EnemyArchetype;
-      this.nightDayNumber = Math.max(1, Math.round(Number(nightSave.current_day_number ?? 1)));
+      this.nightDayNumber = Math.max(
+        1,
+        Math.round(
+          Number(
+            nightSave.current_day_number ??
+              Math.max(1, Math.round(Number(data.day_count ?? 1))),
+          ),
+        ),
+      );
       this.westSpawned = clamp(Math.round(Number(nightSave.west_spawned_count ?? 0)), 0, 2);
       this.west.active = Boolean(nightSave.west_enemy_active);
       this.west.x = Number(nightSave.west_enemy_x ?? NIGHT.WEST_SPAWN_X);
@@ -2675,6 +2812,7 @@ export class GameEngine {
       agents: this.agents
         .filter((a) => a.recruited)
         .map((a) => ({ id: a.id, role: a.role, state: a.state, recruited: a.recruited })),
+      era: this.eraName(),
       hasSave: this.hasSaveCache,
     };
   }
@@ -2687,19 +2825,9 @@ export class GameEngine {
 const PLAYER_SPEED = 240.0;
 
 function plotTitle(plotId: string): string {
-  switch (plotId) {
-    case WALL_ID:
-      return "Wall Plot";
-    case WEST_WALL_ID:
-      return "West Wall";
-    case WATCHTOWER_ID:
-      return "Watchtower";
-    case FARM_WEST_ID:
-    case FARM_EAST_ID:
-      return "Farm Plot";
-    default:
-      return plotId;
-  }
+  // Title dari konfigurasi plot (PLOT_SEEDS, cermin data/buildings.json).
+  const seed = PLOT_SEEDS.find((s) => s.id === plotId);
+  return seed?.title ?? plotId;
 }
 
 function costLabel(cost: Partial<Record<ResourceId, number>>): string {

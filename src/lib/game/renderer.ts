@@ -492,6 +492,29 @@ export class Renderer {
     // --- world labels & prompts (screen-crisp) ---
     this.drawLabels(engine);
 
+    // --- flying payment particles (resources/gold to target) ---
+    const PAYMENT_COLORS: Record<string, string> = {
+      gold: "#ffd647",
+      wood: "#9e6b38",
+      stone: "#9ea8b3",
+    };
+    for (const d of engine.payments) {
+      const t = Math.min(1, Math.max(0, (d.age - d.delay) / 0.55));
+      if (d.age < d.delay) continue;
+      const ease = t * t * (3 - 2 * t);
+      const wx = d.fromX + (d.toX - d.fromX) * ease;
+      const wy = -38 - 8 * Math.sin(Math.PI * t);
+      const alpha = d.age >= d.delay + 0.55 ? Math.max(0, 1 - (d.age - d.delay - 0.55) / 0.12) : 1;
+      if (alpha <= 0) continue;
+      const sx = this.w2sX(wx);
+      const sy = this.w2sY(wy);
+      const size = Math.max(4, Math.round(7 * this.zoom * 0.66));
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = PAYMENT_COLORS[d.resource] ?? "#ffffff";
+      ctx.fillRect(sx - size / 2, sy - size / 2, size, size);
+      ctx.globalAlpha = 1;
+    }
+
     // --- floating texts ---
     for (const f of engine.floats) {
       const wy = -48 - (f.age / 0.85) * 30;
