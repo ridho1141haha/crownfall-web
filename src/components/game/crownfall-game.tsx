@@ -92,6 +92,78 @@ export default function CrownfallGame() {
     });
     engineRef.current = engine;
 
+    // E2E / QA instrumentation: read-only state dump, no gameplay effect.
+    if (process.env.NODE_ENV !== "production") {
+      const w = window as unknown as {
+        __crownfall?: {
+          read: () => Record<string, unknown>;
+          engine: GameEngine;
+        };
+      };
+      w.__crownfall = {
+        engine,
+        read: () => ({
+          started: engine.started,
+          paused: engine.paused,
+          day: engine.day,
+          phase: engine.phase,
+          phaseElapsed: Math.round(engine.phaseElapsed * 10) / 10,
+          timeScale: engine.timeScale,
+          gold: engine.gold,
+          wood: engine.wood,
+          stone: engine.stone,
+          playerX: Math.round(engine.playerX * 10) / 10,
+          reign: engine.reign,
+          hearthLevel: engine.hearthLevel,
+          hearthBoost: Math.round(engine.hearthBoost),
+          flareTimer: Math.round(engine.flareTimer * 10) / 10,
+          flareCooldown: Math.round(engine.flareCooldown * 10) / 10,
+          shipwreckStage: engine.shipwreckStage,
+          portalLooted: engine.portalLooted,
+          shrineUsedToday: engine.shrineUsedToday,
+          campVagrants: engine.campVagrants,
+          nightActive: engine.nightActive,
+          nightElapsed: Math.round(engine.nightElapsed * 10) / 10,
+          spawnedWaves: engine.spawnedWaves,
+          westSpawned: engine.westSpawned,
+          settlementBreached: engine.settlementBreached,
+          plots: [...engine.plots.values()].map((p) => ({
+            id: p.id,
+            type: p.type,
+            x: p.x,
+            level: p.level,
+            state: p.state,
+            progress: Math.round(p.progress * 100) / 100,
+            durability: Math.round(p.durability * 10) / 10,
+            maxDurability: p.maxDurability,
+          })),
+          agents: engine.agents.map((a) => ({
+            id: a.id,
+            role: a.role,
+            recruited: a.recruited,
+            state: a.state,
+            x: Math.round(a.x),
+            task: a.task,
+          })),
+          enemies: [
+            engine.night.active
+              ? { side: "east", ...engine.night, x: Math.round(engine.night.x), hp: Math.round(engine.night.hp) }
+              : null,
+            engine.west.active
+              ? { side: "west", ...engine.west, x: Math.round(engine.west.x), hp: Math.round(engine.west.hp) }
+              : null,
+          ].filter(Boolean),
+          nodesCollected: [...engine.nodeStates.entries()]
+            .filter(([, done]) => done)
+            .map(([id]) => id),
+          treesFelled: engine
+            .treeStatesForRender()
+            .filter((t) => t.felled)
+            .map((t) => t.id),
+        }),
+      };
+    }
+
     const renderer = new Renderer();
     rendererRef.current = renderer;
     void renderer.load();
