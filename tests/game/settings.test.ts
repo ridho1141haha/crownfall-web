@@ -6,6 +6,7 @@
 
 import { describe, test, expect, beforeEach } from "bun:test";
 
+import { AudioManager } from "../../src/lib/game/audio";
 import {
   DEFAULT_SETTINGS,
   SETTINGS_STORAGE_KEY,
@@ -64,5 +65,25 @@ describe("P4-D — settings storage round-trip", () => {
     expect(loadSettings()).toEqual(DEFAULT_SETTINGS);
     localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({ volume: "bad", extra: 1 }));
     expect(loadSettings()).toEqual(DEFAULT_SETTINGS);
+  });
+});
+
+
+describe("P4-D — AudioManager master volume", () => {
+  test("clamps finite values and uses default volume for all non-finite values", () => {
+    const audio = new AudioManager();
+
+    audio.setVolume(0.35);
+    expect(audio.getVolume()).toBe(0.35);
+
+    audio.setVolume(-2);
+    expect(audio.getVolume()).toBe(0);
+    audio.setVolume(2);
+    expect(audio.getVolume()).toBe(1);
+
+    for (const value of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      audio.setVolume(value);
+      expect(audio.getVolume()).toBe(1);
+    }
   });
 });
