@@ -28,10 +28,13 @@
 //     payloads — after migration its validate_payload() still requires it
 //     (REQUIRED_KEYS), so a realistic v1 save FAILS validation in Godot today.
 //
-// Intentional cross-platform incompatibility (documented, Phase 2 audit):
-//   - Web v3 and Godot v2 represent DIFFERENT platform contracts. The numbers
-//     are NOT forced to align and cross-platform save import is not a goal.
-//     The only historical formats ever written under version numbers 1 and 2
+// Asymmetric cross-platform compatibility boundary:
+//   - Web writes schema 3; Godot writes schema 2. These remain separate write
+//     contracts and their version numbers are NOT forced to align.
+//   - Web deliberately supports one-way import of verified historical Godot
+//     v2 payloads through this migration pipeline. Godot does NOT accept Web
+//     schema 3, so this is NOT bidirectional cross-platform save sync.
+//   - The only historical formats ever written under version numbers 1 and 2
 //     are Godot's, so this pipeline treats v1/v2 payloads as Godot-format
 //     saves and mirrors Godot's migrate_payload() transforms field by field.
 //     Fields whose historical meaning is NOT verified (e.g. a fabricated
