@@ -232,7 +232,7 @@ Also verified: dev.log clean over the whole session (no runtime errors, no hydra
 
 ## 14. Intentional differences between Godot and Web (Phase 4 additions to the audit list)
 
-1. **Schema version numbers differ** (web 3 / Godot 2) and are deliberately not aligned — documented platform contracts; the migration pipeline treats v1/v2 as the Godot formats those numbers verifiably belonged to.
+1. **Schema write contracts differ** (Web writes v3 / Godot writes v2). Web now deliberately supports one-way import of verified Godot v2 payloads through migration; Godot still rejects Web v3. This is backward-compatibility for legacy Godot saves, not bidirectional cross-platform save synchronization. Realistic Godot v1 payloads still fail post-migration validation because they lack required night_encounter data, matching Godot's current validator outcome.
 2. **Migrated v1 saves without `night_encounter` are rejected** — identical to Godot's own current accept/reject outcome (Godot also never synthesizes encounter data for v1).
 3. **Fullscreen preference is applied on the first user gesture**, not at startup — browsers require a gesture for fullscreen; Godot applies it unconditionally. The persisted preference is honored (auto-attempt once per session), the control always reflects the real browser state.
 4. **Web persists a separate mute toggle** (pre-existing M-key UX) in addition to Godot's volume-as-mute; both end in the same ≤ 0.001 mute behavior.
