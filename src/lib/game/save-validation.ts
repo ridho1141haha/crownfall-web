@@ -205,8 +205,9 @@ export function isValidSavedNpcDict(data: unknown): boolean {
 /**
  * Port of NightEncounterManager.is_valid_saved_encounter_dict().
  * The six mid-combat sub-fields (attack timers, burn accumulators, trampled
- * lists) are optional — the web payload omits them (audit B7) while saves
- * produced by legitimate flows always carry them as dormant zeros.
+ * lists) remain optional for legacy-save compatibility. Current Web payloads
+ * always serialize them, including dormant post-night values, for full
+ * mid-encounter save/restore parity (Phase 4 B7).
  */
 export function isValidSavedEncounterDict(data: unknown): boolean {
   if (data === null || typeof data !== "object" || Array.isArray(data)) {
