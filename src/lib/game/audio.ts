@@ -35,14 +35,11 @@ export class AudioManager {
     return this.muted;
   }
 
-  /** Linear master volume, clamped to [0, 1]; NaN/Infinity fall back to 1. */
+  /** Linear master volume, clamped to [0, 1]; all non-finite values fall back to 1. */
   setVolume(volume: number) {
-    this.masterVolume =
-      Number.isFinite(volume) && volume > 0
-        ? Math.min(volume, 1)
-        : volume <= 0
-          ? 0
-          : 1;
+    this.masterVolume = Number.isFinite(volume)
+      ? Math.min(1, Math.max(0, volume))
+      : 1;
   }
 
   getVolume() {
