@@ -340,7 +340,9 @@ export default function CrownfallGame() {
       // user's display preference. Persist the actual browser state so a
       // stale fullscreen preference does not re-enter on the next reload.
       fsPrefRef.current = active;
-      persistCurrentSettings({ fullscreen: active });
+      // Read the latest volume/mute preferences instead of a potentially
+      // stale React closure captured when this listener was first attached.
+      saveSettings({ ...loadSettings(), fullscreen: active });
     };
     const onError = () => {
       setIsFullscreen(Boolean(document.fullscreenElement));
