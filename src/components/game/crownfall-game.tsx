@@ -333,7 +333,15 @@ export default function CrownfallGame() {
   // Keep the fullscreen UI state synchronized with the ACTUAL browser state
   // (Esc exit, F11, other tabs) — Godot has no equivalent source of truth.
   useEffect(() => {
-    const sync = () => setIsFullscreen(Boolean(document.fullscreenElement));
+    const sync = () => {
+      const active = Boolean(document.fullscreenElement);
+      setIsFullscreen(active);
+      // An external exit (for example, Escape) is an explicit change in the
+      // user's display preference. Persist the actual browser state so a
+      // stale fullscreen preference does not re-enter on the next reload.
+      fsPrefRef.current = active;
+      persistCurrentSettings({ fullscreen: active });
+    };
     const onError = () => {
       setIsFullscreen(Boolean(document.fullscreenElement));
       pushToast("Fullscreen request was rejected by the browser.");
