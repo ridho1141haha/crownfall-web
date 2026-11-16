@@ -205,8 +205,9 @@ export function isValidSavedNpcDict(data: unknown): boolean {
 /**
  * Port of NightEncounterManager.is_valid_saved_encounter_dict().
  * The six mid-combat sub-fields (attack timers, burn accumulators, trampled
- * lists) are optional — the web payload omits them (audit B7) while saves
- * produced by legitimate flows always carry them as dormant zeros.
+ * lists) remain optional for legacy-save compatibility. Current Web payloads
+ * always serialize them, including dormant post-night values, for full
+ * mid-encounter save/restore parity (Phase 4 B7).
  */
 export function isValidSavedEncounterDict(data: unknown): boolean {
   if (data === null || typeof data !== "object" || Array.isArray(data)) {
@@ -325,11 +326,15 @@ export function isValidSavedTreeStates(data: unknown): boolean {
 /**
  * Port of SaveManager.gd validate_payload(), adapted to the Web save schema.
  *
- * Schema note (intentional platform difference preserved from the audit):
- * the web writes schema_version 3 while Godot writes 2. Versions 1..3 are
- * accepted here — the web payload has always been version 3, and the range
- * mirrors Godot's MIN_SCHEMA_VERSION..SCHEMA_VERSION pattern without
- * cross-platform save import.
+ * Schema contract (P4-B, explicit):
+ * this function validates ONLY the current web schema (`SAVE_SCHEMA_VERSION`,
+ * currently 3 — the only schema version any web release ever wrote, verified
+ * via `git log -S SAVE_SCHEMA_VERSION`). Legacy versions 1 and 2 were never
+ * produced by the web app; the historical formats under those numbers are the
+ * Godot save formats, and they must go through `migrateSavePayload()` BEFORE
+ * validation — a schema version is never accepted without the migration
+ * needed for it. Unsupported versions (< 1, > current, non-integer) are
+ * rejected explicitly.
  *
  * Rejects (among others): non-finite numbers, fractional values where exact
  * integers are required, out-of-range resources (negative or above the
@@ -346,10 +351,13 @@ export function validateSavePayload(data: unknown): boolean {
     if (!(key in dict)) return false;
   }
 
-  // schema_version: exact int within the supported web range.
+  // schema_version: exact int, and ONLY the current web schema. Legacy
+  // versions 1..2 must be migrated first (see migrateSavePayload) — the
+  // Phase 2/3 posture of accepting the whole 1..3 range here allowed a v1
+  // payload through with no migration path (Phase 4 finding P2-B).
   if (!isExactIntValue(dict.schema_version)) return false;
   const ver = dict.schema_version;
-  if (ver < 1 || ver > SAVE_SCHEMA_VERSION) return false;
+  if (ver !== SAVE_SCHEMA_VERSION) return false;
 
   // world / island identifiers
   if (!nonEmptyString(dict.world_id) || !nonEmptyString(dict.island_id)) {

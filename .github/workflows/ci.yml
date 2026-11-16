@@ -23,8 +23,22 @@ jobs:
       - name: ESLint
         run: bun run lint
 
+      # P4-C: clone the ACTUAL Godot source before running the suite. The
+      # config-parity test is part of tests/game/, and in CI it asserts that
+      # the live source (not the local fixture fallback) is being compared.
+      # After an intentional Godot data change, mirror values in data.ts,
+      # refresh tests/fixtures/godot-data/, and re-pin GODOT_PARITY_COMMIT.
+      - name: Clone Godot source of truth (config parity reference)
+        run: |
+          git clone https://github.com/ridho1141haha/crownfall.git /tmp/crownfall-ref
+          git -C /tmp/crownfall-ref checkout "$GODOT_PARITY_COMMIT"
+        env:
+          GODOT_PARITY_COMMIT: 2c61632de046da04b0f291761574b6d900d4037d
+
       - name: Automated gameplay tests (bun test)
         run: bun test tests/game/
+        env:
+          GODOT_DATA_DIR: /tmp/crownfall-ref/data
 
       - name: Production build
         # next build needs the Prisma client generated (postinstall does this

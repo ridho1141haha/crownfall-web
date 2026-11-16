@@ -34,10 +34,19 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
+import { Slider } from "@/components/ui/slider";
+import { Switch } from "@/components/ui/switch";
+import { Maximize, Minimize, Settings } from "lucide-react";
 import { VIEW } from "@/lib/game/data";
 import { GameEngine } from "@/lib/game/engine";
 import { Renderer } from "@/lib/game/renderer";
 import { AudioManager } from "@/lib/game/audio";
+import {
+  DEFAULT_SETTINGS,
+  loadSettings,
+  saveSettings,
+  type CrownfallSettings,
+} from "@/lib/game/settings";
 import type { Snapshot } from "@/lib/game/types";
 
 interface Toast {
@@ -66,7 +75,23 @@ export default function CrownfallGame() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [victory, setVictory] = useState<{ title: string; subtitle: string } | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const [muted, setMuted] = useState(false);
+  // P4-D: settings load once at first render (client-only — the initializer
+  // falls back to defaults during SSR, and no settings-dependent UI exists in
+  // the initial title-screen render, so hydration stays consistent).
+  const [savedSettings] = useState(() =>
+    typeof window === "undefined" ? DEFAULT_SETTINGS : loadSettings(),
+  );
+  const [muted, setMuted] = useState(savedSettings.muted);
+  const [volume, setVolume] = useState(savedSettings.volume);
+  const [pausePanel, setPausePanel] = useState<"main" | "settings">("main");
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [fsSupported] = useState(
+    () =>
+      typeof document !== "undefined" && Boolean(document.fullscreenEnabled),
+  );
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const fsPrefRef = useRef(savedSettings.fullscreen);
+  const fsAutoAttemptedRef = useRef(false);
 
   const pushToast = useCallback((text: string) => {
     setToasts((ts) => {
@@ -205,6 +230,7 @@ export default function CrownfallGame() {
       }
       if (k === "escape") {
         setPaused((p) => !p);
+        setPausePanel("main");
         return;
       }
       if (pausedRef.current) return;
@@ -228,7 +254,27 @@ export default function CrownfallGame() {
       if (k === "a" || k === "arrowleft") eng.input.left = false;
       else if (k === "d" || k === "arrowright") eng.input.right = false;
     };
-    const firstGesture = () => audio.unlock();
+    const firstGesture = () => {
+      audio.unlock();
+      // P4-D: browsers require a user gesture for fullscreen — honor the
+      // persisted preference on the first gesture (Godot applies it at
+      // startup; the gesture requirement is a documented platform limit).
+      if (
+        fsPrefRef.current &&
+        !fsAutoAttemptedRef.current &&
+        typeof document !== "undefined" &&
+        document.fullscreenEnabled &&
+        !document.fullscreenElement &&
+        viewportRef.current
+      ) {
+        fsAutoAttemptedRef.current = true;
+        viewportRef.current
+          .requestFullscreen()
+          .catch(() => {
+            /* rejection handled by fullscreenerror listener / toggle state */
+          });
+      }
+    };
     window.addEventListener("keydown", down);
     window.addEventListener("keyup", up);
     window.addEventListener("pointerdown", firstGesture, { once: true });
@@ -258,6 +304,85 @@ export default function CrownfallGame() {
   useEffect(() => {
     audioRef.current?.setMuted(muted);
   }, [muted]);
+
+  useEffect(() => {
+    audioRef.current?.setVolume(volume);
+  }, [volume]);
+
+  // P4-D persistence: any volume/mute change survives reloads (settings.ts
+  // sanitizes defensively; storage failures are non-fatal).
+  const persistCurrentSettings = (
+    patch: Partial<CrownfallSettings>,
+  ) => {
+    saveSettings({
+      volume,
+      muted,
+      fullscreen: fsPrefRef.current,
+      ...patch,
+    });
+  };
+
+  useEffect(() => {
+    persistCurrentSettings({ volume });
+  }, [volume]);
+
+  useEffect(() => {
+    persistCurrentSettings({ muted });
+  }, [muted]);
+
+  // Keep the fullscreen UI state synchronized with the ACTUAL browser state
+  // (Esc exit, F11, other tabs) — Godot has no equivalent source of truth.
+  useEffect(() => {
+    const sync = () => {
+      const active = Boolean(document.fullscreenElement);
+      setIsFullscreen(active);
+      // An external exit (for example, Escape) is an explicit change in the
+      // user's display preference. Persist the actual browser state so a
+      // stale fullscreen preference does not re-enter on the next reload.
+      fsPrefRef.current = active;
+      // Read the latest volume/mute preferences instead of a potentially
+      // stale React closure captured when this listener was first attached.
+      saveSettings({ ...loadSettings(), fullscreen: active });
+    };
+    const onError = () => {
+      setIsFullscreen(Boolean(document.fullscreenElement));
+      pushToast("Fullscreen request was rejected by the browser.");
+    };
+    document.addEventListener("fullscreenchange", sync);
+    document.addEventListener("fullscreenerror", onError);
+    return () => {
+      document.removeEventListener("fullscreenchange", sync);
+      document.removeEventListener("fullscreenerror", onError);
+    };
+  }, []);
+
+  const toggleFullscreen = () => {
+    const el = viewportRef.current;
+    if (!el || typeof document === "undefined" || !document.fullscreenEnabled) {
+      return;
+    }
+    if (document.fullscreenElement) {
+      fsPrefRef.current = false;
+      persistCurrentSettings({ fullscreen: false });
+      void document.exitFullscreen().catch(() => setIsFullscreen(false));
+      return;
+    }
+    fsAutoAttemptedRef.current = true;
+    el
+      .requestFullscreen()
+      .then(() => {
+        fsPrefRef.current = true;
+        // Do not write React state captured before this async request; the
+        // player may have changed volume/mute while the browser prompt was
+        // pending. Preserve the latest persisted audio preferences.
+        saveSettings({ ...loadSettings(), fullscreen: true });
+      })
+      .catch(() => {
+        // request rejected (permissions/iframe policy) — the fullscreenerror
+        // listener already surfaces the toast and re-syncs the UI state;
+        // preference untouched so the user can retry from the toggle.
+      });
+  };
 
   // auto-dismiss victory banner (mirrors the 7s Godot banner)
   useEffect(() => {
@@ -381,7 +506,10 @@ export default function CrownfallGame() {
                 variant="outline"
                 size="sm"
                 className="border-stone-700 bg-stone-900/90 text-stone-200 hover:bg-stone-800 hover:text-stone-100"
-                onClick={() => setPaused(true)}
+                onClick={() => {
+                  setPaused(true);
+                  setPausePanel("main");
+                }}
                 aria-label="Pause (Esc)"
               >
                 <PauseIcon className="h-4 w-4" />
@@ -392,7 +520,10 @@ export default function CrownfallGame() {
         </header>
 
         {/* game viewport */}
-        <div className="relative w-full overflow-hidden rounded-lg border border-stone-800 bg-black shadow-2xl">
+        <div
+          ref={viewportRef}
+          className="relative w-full overflow-hidden rounded-lg border border-stone-800 bg-black shadow-2xl"
+        >
           <canvas
             ref={canvasRef}
             width={VIEW.WIDTH}
@@ -584,6 +715,8 @@ export default function CrownfallGame() {
           {screen === "game" && paused && (
             <div className="absolute inset-0 flex items-center justify-center bg-stone-950/80 backdrop-blur-sm">
               <div className="w-full max-w-xs rounded-lg border border-stone-700 bg-stone-900/95 p-5 shadow-2xl">
+                {pausePanel === "main" ? (
+                  <>
                 <h3 className="text-center text-lg font-bold tracking-widest text-amber-100">
                   PAUSED
                 </h3>
@@ -603,6 +736,13 @@ export default function CrownfallGame() {
                     }}
                   >
                     <Save className="h-4 w-4" /> Save (K)
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    className="gap-2"
+                    onClick={() => setPausePanel("settings")}
+                  >
+                    <Settings className="h-4 w-4" /> Settings
                   </Button>
                   <Button
                     variant="secondary"
@@ -636,6 +776,62 @@ export default function CrownfallGame() {
                 <p className="mt-3 text-center text-[10px] text-stone-500">
                   Saves are kept in this browser (slot 0, with backup recovery).
                 </p>
+                  </>
+                ) : (
+                  <>
+                    {/* ------- Settings panel (Godot PauseMenu parity) ------- */}
+                    <h3 className="text-center text-lg font-bold tracking-widest text-amber-100">
+                      SETTINGS
+                    </h3>
+                    <div className="mt-5">
+                      <div className="flex items-center justify-between text-sm text-stone-200">
+                        <span>Master Volume</span>
+                        <span className="text-stone-400">
+                          {Math.round(volume * 100)}%
+                        </span>
+                      </div>
+                      <Slider
+                        className="mt-2"
+                        value={[volume]}
+                        min={0}
+                        max={1}
+                        step={0.05}
+                        onValueChange={(vals) => setVolume(vals[0] ?? 0)}
+                        aria-label="Master volume"
+                      />
+                    </div>
+                    <div className="mt-5 flex items-center justify-between text-sm text-stone-200">
+                      <span className="inline-flex items-center gap-2">
+                        {isFullscreen ? (
+                          <Minimize className="h-4 w-4" />
+                        ) : (
+                          <Maximize className="h-4 w-4" />
+                        )}
+                        Fullscreen
+                      </span>
+                      <Switch
+                        checked={isFullscreen}
+                        disabled={!fsSupported}
+                        onCheckedChange={(checked) => {
+                          if (checked !== isFullscreen) toggleFullscreen();
+                        }}
+                        aria-label="Toggle fullscreen"
+                      />
+                    </div>
+                    {!fsSupported && (
+                      <p className="mt-1 text-right text-[10px] text-stone-500">
+                        Fullscreen is not supported by this browser
+                      </p>
+                    )}
+                    <Button
+                      variant="outline"
+                      className="mt-5 w-full gap-2 border-stone-700 bg-stone-900/90 text-stone-200 hover:bg-stone-800 hover:text-stone-100"
+                      onClick={() => setPausePanel("main")}
+                    >
+                      Back
+                    </Button>
+                  </>
+                )}
               </div>
             </div>
           )}
