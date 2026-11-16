@@ -372,7 +372,10 @@ export default function CrownfallGame() {
       .requestFullscreen()
       .then(() => {
         fsPrefRef.current = true;
-        persistCurrentSettings({ fullscreen: true });
+        // Do not write React state captured before this async request; the
+        // player may have changed volume/mute while the browser prompt was
+        // pending. Preserve the latest persisted audio preferences.
+        saveSettings({ ...loadSettings(), fullscreen: true });
       })
       .catch(() => {
         // request rejected (permissions/iframe policy) — the fullscreenerror
