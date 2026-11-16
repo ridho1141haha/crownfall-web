@@ -310,7 +310,7 @@ The fullscreen UI reflected the actual document.fullscreenElement, but exiting f
 
 **Fix:** the fullscreenchange handler now updates both UI state and the stored fullscreen preference from the actual browser state. It reads the latest persisted audio settings before writing, avoiding stale React closure values from overwriting a newer volume or mute preference.
 
-Commits: 3687f93 and 19147f9.
+Commits: 3687f93, 19147f9, and af70f70 (the asynchronous fullscreen success handler also reads the latest stored audio preferences rather than a stale React closure).
 
 ### 17.5 Validator documentation corrected
 
@@ -320,4 +320,4 @@ Commit: f5e1111.
 
 ### Follow-up verification
 
-The workflow was rerun after the CI ordering fix and passed on the intermediate commit 56f9ee5: ESLint, pinned Godot clone, full Bun suite (202 tests / 799 assertions), and production build all succeeded. A final run is required against the latest branch head after the subsequent audio/fullscreen/comment hardening; the final head SHA and exact counts must be taken from that run, not inferred from this earlier result.
+The latest completed CI run on code commit af70f70 (run [#43793134373](https://github.com/ridho1141haha/crownfall-web/actions/runs/43793134373)) passed: ESLint, pinned Godot source clone, full Bun suite (**203 pass / 0 fail / 805 expect() calls across 8 files**), and production build. The run completed successfully after the final audio and fullscreen code hardening. The earlier reported 14/14 browser E2E scenarios were executed by the implementation agent on the initial Phase 4 implementation; they were not independently re-run after the later fullscreen preference refinement. The latest source-level and CI checks are verified, but the browser-only Escape/reload preference scenario remains a manual E2E confirmation item.
