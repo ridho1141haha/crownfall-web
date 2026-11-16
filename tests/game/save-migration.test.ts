@@ -443,3 +443,33 @@ describe("loadGame — legacy saves migrate through the real load path", () => {
     expect(fresh.treeHp.get("tree_west_01")).toBe(1);
   });
 });
+
+describe("saveGame — migrated legacy primary backup staging", () => {
+  test("valid Godot v2 primary is staged before being replaced by web v3", () => {
+    installStorage();
+    const legacyRaw = JSON.stringify(makeGodotV2Payload());
+    writeSlot(SAVE_KEY, legacyRaw);
+
+    const { engine } = makeEngine();
+    expect(engine.loadGame()).toBe(true);
+    engine.gold = 20;
+    expect(engine.saveGame()).toBe(true);
+
+    // Godot's SaveManager validates the existing save through migration
+    // before staging its original bytes as .bak. Web must do the same:
+    // the v2 payload is valid after migration, even though raw v2 is not
+    // accepted by the current-schema-only validator.
+    expect(localStorage.getItem(SAVE_BACKUP_KEY)).toBe(legacyRaw);
+
+    // Prove the staged legacy backup remains recoverable and self-heals to v3.
+    localStorage.setItem(SAVE_KEY, "{corrupt-primary");
+    const { engine: recovered } = makeEngine();
+    expect(recovered.loadGame()).toBe(true);
+    expect(recovered.gold).toBe(12); // original v2 backup, not overwritten
+    const healed = JSON.parse(
+      localStorage.getItem(SAVE_KEY) as string,
+    ) as Record<string, unknown>;
+    expect(healed.schema_version).toBe(3);
+    expect((healed.resources as Record<string, unknown>).gold).toBe(12);
+  });
+});
