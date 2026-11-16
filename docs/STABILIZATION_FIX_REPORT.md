@@ -186,10 +186,10 @@ Not browser-verified (covered deterministically by unit tests instead): night-cy
 
 ## 8. Known Limitations & Deferred Findings
 
-1. **B7 — encounter sub-state persistence (DEFERRED, not implemented).** `attack_timer`, `light_burn_acc`, `west_attack_timer`, `west_burn_acc`, `east_trampled`, `west_trampled` are still not written to the web payload. Per the audit (§4.3) this is dormant: manual saves are night-locked and the only autosave fires at sunrise, so legitimate saves always carry these as zeros. The validator accepts them as optional fields (Godot parity), so a future payload extension needs no schema change. Implementing it now would have required touching `buildSavePayload`/restore mid-combat semantics — deliberately out of scope per "keep changes focused".
+1. **B7 — encounter sub-state persistence (DEFERRED in Phase 3; RESOLVED in Phase 4).** At the Phase 3 baseline, `attack_timer`, `light_burn_acc`, `west_attack_timer`, `west_burn_acc`, `east_trampled`, and `west_trampled` were not written to the Web payload. Phase 4 now serializes and restores all six fields with Godot's rounding, clamps, per-side trampled filters, and legacy defaults. See `docs/PHASE_4_IMPLEMENTATION_REPORT.md`, Section 6.
 2. **`refreshHasSave()` purity vs Godot.** Godot's continue-state check can incidentally repair a corrupt primary (its `load_state` self-heals during validation). Web's check is pure; healing happens on actual load. No player-visible difference.
 3. **localStorage has no atomic rename.** Godot's tmp-file + `.old` rollback dance is approximated by validate-before-write + backup-first ordering. The quota-failure test proves the practical invariant (a valid save always survives).
-4. **Cross-platform saves remain mutually rejected.** Web v3 payloads fail Godot's v2-capped validator and vice versa — unchanged intentional difference, documented in the audit.
+4. **Cross-platform save compatibility is asymmetric (Phase 4 update).** Web can migrate verified Godot v2 payloads into Web v3. Godot still rejects Web v3, so this is one-way legacy import, not bidirectional save synchronization.
 5. **Pre-existing TypeScript strictness errors** in `renderer.ts`/`engine.ts` const-literal typing (14) are untouched — the project builds with `ignoreBuildErrors: true`; fixing them is unrelated refactoring.
 6. **CI build step** was verified locally (compiles clean, no secrets needed) and included; first CI run on GitHub has not been observed yet (branch push triggers it — see below).
 
