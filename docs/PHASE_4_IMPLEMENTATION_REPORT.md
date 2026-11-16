@@ -270,3 +270,54 @@ Also verified: dev.log clean over the whole session (no runtime errors, no hydra
 - [x] Implementation report complete (this document)
 - [x] Changes committed on the dedicated branch
 - [x] No changes merged into `main`
+---
+
+## 17. Independent follow-up review after the initial Phase 4 report
+
+A separate review of the committed implementation found additional issues that were fixed before requesting a merge.
+
+### 17.1 CI ordering defect (fixed)
+
+The first Phase 4 CI run (commit 7f720e2, run [#43737566395](https://github.com/ridho1141haha/crownfall-web/actions/runs/43737566395)) failed because the full test suite ran before the Godot source clone. The config-parity test correctly refused to use local fixtures in CI, so 200 tests passed and the CI-source assertion failed.
+
+**Fix:** moved the pinned Godot clone before the full test step and passed GODOT_DATA_DIR=/tmp/crownfall-ref/data to the entire suite. The parity test now runs against actual Godot source data in CI. Workflow fix commit: 72f7dd1. This is a CI orchestration defect, not a gameplay regression.
+
+### 17.2 Legacy primary was not staged as backup during first Web re-save (fixed)
+
+The initial Phase 4 saveGame() backup staging path called the current-schema-only validateSavePayload(existingData) directly. A structurally valid Godot v2 save therefore failed the new schema gate and would not be staged to backup when the migrated game was saved as Web v3.
+
+**Fix:** backup staging now uses the same parse → migrateSavePayload() → validateSavePayload() pipeline as load and Continue gating. The original raw legacy bytes are kept in backup after migration-aware validation; backup recovery migrates them before applying and self-heals primary to Web v3.
+
+Added a regression test that:
+1. Writes a representative Godot v2 save to primary.
+2. Loads it through the real engine path.
+3. Changes progress and saves as Web v3.
+4. Verifies the original Godot v2 bytes were staged to backup.
+5. Corrupts primary and recovers the original v2 backup.
+6. Verifies original progress is restored and primary is self-healed to v3.
+
+Fix commit: f70a98e. Regression test commit: 56f9ee5.
+
+### 17.3 Audio volume non-finite edge case (fixed)
+
+AudioManager.setVolume(-Infinity) previously resolved to zero while the documented contract said all non-finite values fall back to the default volume. The implementation now clamps finite values to [0, 1] and consistently falls back to 1 for NaN and both infinities. Added a regression test.
+
+Commits: 1da7d78 and 91952ca.
+
+### 17.4 Fullscreen preference stale after browser-initiated exit (fixed)
+
+The fullscreen UI reflected the actual document.fullscreenElement, but exiting fullscreen with Escape only changed UI state; the persisted preference could remain true and trigger another fullscreen attempt on the next reload.
+
+**Fix:** the fullscreenchange handler now updates both UI state and the stored fullscreen preference from the actual browser state. It reads the latest persisted audio settings before writing, avoiding stale React closure values from overwriting a newer volume or mute preference.
+
+Commits: 3687f93 and 19147f9.
+
+### 17.5 Validator documentation corrected
+
+The encounter validator comment now says the six sub-fields remain optional for backwards compatibility, while current Web payloads always serialize them. This removes stale B7 wording after P4-A completion.
+
+Commit: f5e1111.
+
+### Follow-up verification
+
+The workflow was rerun after the CI ordering fix and passed on the intermediate commit 56f9ee5: ESLint, pinned Godot clone, full Bun suite (202 tests / 799 assertions), and production build all succeeded. A final run is required against the latest branch head after the subsequent audio/fullscreen/comment hardening; the final head SHA and exact counts must be taken from that run, not inferred from this earlier result.
