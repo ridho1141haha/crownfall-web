@@ -2657,8 +2657,19 @@ export class GameEngine {
       const existingRaw = this.readStorage(SAVE_KEY);
       if (existingRaw !== null) {
         const existingData = parseSaveJson(existingRaw);
-        if (existingData !== null && validateSavePayload(existingData)) {
-          localStorage.setItem(SAVE_BACKUP_KEY, existingRaw);
+        if (existingData !== null) {
+          // P2-B: validate existing saves through the same parse → migrate →
+          // validate pipeline used by loadGame(). A valid legacy Godot v2
+          // primary must be eligible for backup before this v3 save replaces
+          // it. Preserve the original raw payload in the backup; recovery
+          // will migrate it before applying, just like Godot's staged backup.
+          const migratedExisting = migrateSavePayload(existingData);
+          if (
+            migratedExisting.ok &&
+            validateSavePayload(migratedExisting.data)
+          ) {
+            localStorage.setItem(SAVE_BACKUP_KEY, existingRaw);
+          }
         }
       }
       localStorage.setItem(SAVE_KEY, payload);
